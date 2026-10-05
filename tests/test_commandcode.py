@@ -47,7 +47,7 @@ def chat_spies(monkeypatch):
         NormalizedChatAnthropic=fake_type("anthropic"),
         _supports_effort=lambda model: not model.startswith("claude-haiku-"),
     ))
-    monkeypatch.setenv("CMD_API_KEY", "cmd-test-only-key")
+    monkeypatch.setenv("COMMAND_CODE_API_KEY", "cmd-test-only-key")
 
 
 @pytest.mark.parametrize("model,api", sorted(COMMANDCODE_MODEL_APIS.items()))
@@ -72,16 +72,19 @@ def test_every_known_model_uses_a_supported_protocol(model, api, chat_spies):
 
 
 def test_missing_key_never_uses_other_provider_keys(monkeypatch):
-    monkeypatch.delenv("CMD_API_KEY", raising=False)
+    monkeypatch.delenv("COMMAND_CODE_API_KEY", raising=False)
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
     monkeypatch.setenv("OPENAI_API_KEY", "not-command-code")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "also-not-command-code")
     for model in ("gpt-6-luna", "claude-sonnet-5-5", "moonshotai/Kimi-K3"):
-        with pytest.raises(ValueError, match="CMD_API_KEY"):
+        with pytest.raises(ValueError, match="COMMAND_CODE_API_KEY"):
             CommandCodeClient(model).get_llm()
 
 
-def test_explicit_key_overrides_environment(chat_spies):
-    assert CommandCodeClient("gpt-6-luna", api_key="explicit").get_llm().kwargs["api_key"] == "explicit"
+@pytest.mark.parametrize("model", ["gpt-6-luna", "claude-sonnet-5-5", "moonshotai/Kimi-K3"])
+def test_explicit_key_overrides_environment(model, chat_spies, monkeypatch):
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
+    assert CommandCodeClient(model, api_key="explicit").get_llm().kwargs["api_key"] == "explicit"
 
 
 @pytest.mark.parametrize("model", [None, "", "  ", 123])
@@ -184,7 +187,7 @@ def test_headers_are_copied(chat_spies):
 
 
 def test_catalog_and_key_mapping():
-    assert get_api_key_env("CommandCode") == "CMD_API_KEY"
+    assert get_api_key_env("CommandCode") == "COMMAND_CODE_API_KEY"
     assert set(COMMANDCODE_MODEL_APIS) <= set(get_known_models()["commandcode"])
     for mode in ("quick", "deep"):
         options = get_model_options("commandcode", mode)
@@ -263,7 +266,8 @@ def test_real_sdk_wire_path_auth_headers_and_tools(model, asynchronous, monkeypa
     except ImportError:
         import httpx
 
-    monkeypatch.setenv("CMD_API_KEY", "cmd-test-only-key")
+    monkeypatch.setenv("COMMAND_CODE_API_KEY", "cmd-test-only-key")
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
     # Foreign-provider settings must never override or accompany Command Code
     # credentials, on either SDK or on its asynchronous path.
     for prefix in ("OPENAI", "ANTHROPIC"):

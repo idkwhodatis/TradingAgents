@@ -35,6 +35,7 @@ def test_every_select_llm_provider_choice_has_an_entry():
         ("anthropic",  "ANTHROPIC_API_KEY"),
         ("google",     "GOOGLE_API_KEY"),
         ("azure",      "AZURE_OPENAI_API_KEY"),
+        ("commandcode", "COMMAND_CODE_API_KEY"),
         ("xai",        "XAI_API_KEY"),
         ("deepseek",   "DEEPSEEK_API_KEY"),
         ("qwen",       "DASHSCOPE_API_KEY"),
@@ -77,6 +78,40 @@ def test_ensure_api_key_returns_existing(monkeypatch, prompts):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-already-set")
     result = prompts.ensure_api_key("openai")
     assert result == "sk-already-set"
+
+
+def test_commandcode_existing_canonical_key_needs_no_prompt(monkeypatch, prompts):
+    monkeypatch.setenv("COMMAND_CODE_API_KEY", "canonical-test-key")
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
+    with patch.object(prompts, "questionary") as mock_q:
+        assert prompts.ensure_api_key("commandcode") == "canonical-test-key"
+    mock_q.password.assert_not_called()
+
+
+def test_commandcode_old_key_alone_does_not_pass_unattended_validation(monkeypatch, prompts):
+    import typer
+
+    monkeypatch.delenv("COMMAND_CODE_API_KEY", raising=False)
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
+    monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(typer.Exit) as exc:
+        prompts.ensure_api_key("commandcode")
+    assert exc.value.exit_code == 1
+
+
+def test_commandcode_prompt_saves_only_canonical_key(monkeypatch, tmp_path, prompts):
+    monkeypatch.delenv("COMMAND_CODE_API_KEY", raising=False)
+    monkeypatch.setenv("CMD_API_KEY", "obsolete-key-must-not-be-used")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(prompts, "find_dotenv", lambda **kwargs: "")
+    with patch.object(prompts.questionary, "password") as password:
+        password.return_value.ask.return_value = "canonical-test-key"
+        assert prompts.ensure_api_key("commandcode") == "canonical-test-key"
+    assert "COMMAND_CODE_API_KEY" in password.call_args.args[0]
+    assert os.environ["COMMAND_CODE_API_KEY"] == "canonical-test-key"
+    content = (tmp_path / ".env").read_text()
+    assert "COMMAND_CODE_API_KEY='canonical-test-key'" in content
+    assert "CMD_API_KEY" not in content
 
 
 def test_ensure_api_key_no_op_for_ollama(monkeypatch, prompts):
@@ -188,3 +223,11 @@ def test_read_only_key_file_is_still_updated(monkeypatch, prompts, tmp_path):
     _prompt_key(prompts, monkeypatch, tmp_path)
     assert "sk-typed-in" in env.read_text()
     assert stat.S_IMODE(env.stat().st_mode) == 0o600
+
+
+def test_commandcode_example_uses_only_the_canonical_key_name():
+    from pathlib import Path
+
+    example = (Path(__file__).resolve().parents[1] / ".env.example").read_text()
+    assert "COMMAND_CODE_API_KEY=" in example.splitlines()
+    assert "CMD_API_KEY" not in example

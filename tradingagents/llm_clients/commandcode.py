@@ -241,7 +241,7 @@ class CommandCodeClient(BaseLLMClient):
         env_var = get_api_key_env(self.provider)
         api_key = self.kwargs.get("api_key") or os.environ.get(env_var or "")
         if not api_key:
-            raise ValueError("Set CMD_API_KEY or pass api_key for Command Code")
+            raise ValueError("Set COMMAND_CODE_API_KEY or pass api_key for Command Code")
         common = {
             key: self.kwargs[key]
             for key in ("timeout", "max_retries", "temperature", "max_tokens",
