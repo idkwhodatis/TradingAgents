@@ -211,7 +211,7 @@ def test_prompted_and_headless_share_incremental_report_contents(setup, monkeypa
     headless = runner.invoke(main.app, ["analyze", "NVDA", "--no-progress"])
     assert headless.exit_code == 0, headless.output
     prompted = {**base, "results_dir": str(tmp_path / "prompted")}
-    answers = iter(["Y", str(tmp_path / "prompted-export"), "N"])
+    answers = iter(["Y", str(tmp_path / "prompted-export"), "N", "N"])
     monkeypatch.setattr(native.typer, "prompt", lambda *a, **k: next(answers))
     result = native.run_analysis(config=prompted,
         selections={"ticker": "NVDA", "analysis_date": "2026-09-27", "asset_type": "stock",
@@ -237,7 +237,7 @@ def test_export_failure_does_not_return_an_old_success_summary(setup, monkeypatc
 
     def fail(*args, **kwargs):
         raise OSError("disk full")
-    monkeypatch.setattr(native, "write_report_tree", fail)
+    monkeypatch.setattr("tradingagents.graph.trading_graph.write_report_tree", fail)
     result = runner.invoke(main.app, ["analyze", "NVDA", "--json"])
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -344,3 +344,12 @@ def test_explicit_checkpoint_before_analyze_is_rejected(setup):
     out = runner.invoke(main.app, ["--clear-checkpoints", "analyze", "NVDA"])
     assert out.exit_code == 2
     assert not graphs
+
+
+def test_headless_can_disable_html_without_disabling_markdown(setup):
+    _, _, runner = setup
+    result = runner.invoke(main.app, ["analyze", "NVDA", "--json", "--no-html"])
+    assert result.exit_code == 0, result.output
+    report = Path(json.loads(result.stdout)["report"])
+    assert report.is_file()
+    assert not report.with_suffix(".html").exists()

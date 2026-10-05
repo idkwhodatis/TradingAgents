@@ -12,7 +12,7 @@ import os
 from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from cli.models import AnalystType
@@ -20,23 +20,24 @@ from cli.run_output import run_directory
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
+from tradingagents.llm_clients.factory import tier_provider
 from tradingagents.llm_clients.headers import parse_llm_headers
 from tradingagents.portfolio import load_portfolio
 
 
-class ResearchEffort(str, Enum):
+class ResearchEffort(StrEnum):
     SHALLOW = "shallow"
     MEDIUM = "medium"
     DEEP = "deep"
 
 
-class AssetMode(str, Enum):
+class AssetMode(StrEnum):
     AUTO = "auto"
     STOCK = "stock"
     CRYPTO = "crypto"
 
 
-class ProviderAPI(str, Enum):
+class ProviderAPI(StrEnum):
     AUTO = "auto"
     CHAT_COMPLETIONS = "chat_completions"
     RESPONSES = "responses"
@@ -77,6 +78,10 @@ def build_headless_config(
                 raise ValueError("Changing --provider requires both --quick-model and --deep-model")
             config["backend_url"] = None
             config["llm_headers"] = None
+            for tier in ("quick", "deep"):
+                if not base.get(f"{tier}_think_provider"):
+                    config[f"{tier}_think_backend_url"] = None
+                    config[f"{tier}_think_llm_headers"] = None
     config.update({key: value for key, value in overrides.items() if value is not None})
     provider = str(config.get("llm_provider", "")).strip().lower()
     if provider not in PROVIDER_API_KEY_ENV:
@@ -205,6 +210,7 @@ def run_headless_analysis(
     progress_mode: str = "off",
     show_report: bool = False,
     save_report: bool = True,
+    html: bool = True,
     clear_checkpoints: bool = False,
 ) -> dict:
     """Resolve inputs and use the native runner without any prompts.
@@ -231,6 +237,8 @@ def run_headless_analysis(
         "asset_type": asset_type,
         "analysts": selected,
         "provider": run_settings["llm_provider"],
+        "quick_provider": tier_provider(run_settings, "quick"),
+        "deep_provider": tier_provider(run_settings, "deep"),
         "quick_model": run_settings["quick_think_llm"],
         "deep_model": run_settings["deep_think_llm"],
         "debate_rounds": run_settings["max_debate_rounds"],
@@ -256,12 +264,14 @@ def run_headless_analysis(
             selections={"ticker": ticker, "analysis_date": trade_date,
                         "analysts": [AnalystType(key) for key in selected], "asset_type": asset_type},
             interactive=False, output_dir=output_dir, progress_mode=progress_mode,
-            show_report=show_report, save_report=save_report, clear_checkpoints=clear_checkpoints,
+            show_report=show_report, save_report=save_report, html=html, clear_checkpoints=clear_checkpoints,
             graph_factory=_create_graph,
         )
         summary.update(status="completed", decision=result.decision,
                        needs_review=result.decision == "REVIEW", report=str(result.report) if result.report is not None else None)
         save_summary()
+        if save_report and result.progress is not None:
+            result.progress.complete()
     except BaseException as exc:
         summary.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
                        decision=None, needs_review=True, report=None)

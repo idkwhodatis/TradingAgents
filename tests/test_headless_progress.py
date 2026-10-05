@@ -269,7 +269,7 @@ def test_cli_selects_auto_mode_before_redirect_stdout(fake_graph, monkeypatch):
 def test_save_failure_is_not_shown_as_completed(fake_graph, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError("disk full")
-    monkeypatch.setattr(native, "write_report_tree", fail)
+    monkeypatch.setattr("tradingagents.graph.trading_graph.write_report_tree", fail)
     result = CliRunner().invoke(main.app, ["analyze", "NVDA", "--json", "--progress"])
     assert result.exit_code == 1
     assert "Saving reports" in result.stderr and "Failed" in result.stderr
@@ -363,3 +363,56 @@ def test_live_redirects_noisy_tools_to_stderr_and_restores_streams(monkeypatch):
     assert sys.stdout is stdout and sys.stderr is stderr
     assert not stdout.getvalue()
     assert "tool diagnostic" in stderr.getvalue()
+
+
+def test_nested_parallel_analyst_turns_and_tools_are_observed(observer):
+    """v0.6 analysts run their tool loops inside private subgraphs."""
+    observer.plain = True
+    from langgraph.graph import END, START, StateGraph
+    from typing_extensions import TypedDict
+
+    class State(TypedDict):
+        count: int
+        market_report: str
+        messages: list
+
+    def agent(state):
+        row = observer.agents["Market Analyst"]
+        assert row.status == "running"
+        assert row.turns == state["count"] + 1
+        if not state["count"]:
+            return {"count": 1, "messages": [SimpleNamespace(tool_calls=[{"name": "prices"}])]}
+        return {"market_report": "done", "messages": []}
+
+    def tools(state):
+        assert observer.phase == "Fetching data: Market Analyst"
+        assert observer.agents["Market Analyst"].status == "waiting"
+        return {}
+
+    inner = StateGraph(State)
+    inner.add_node("agent", agent)
+    inner.add_node("tools", tools)
+    inner.add_edge(START, "agent")
+    inner.add_conditional_edges("agent", lambda state: END if state["market_report"] else "tools")
+    inner.add_edge("tools", "agent")
+    outer = StateGraph(State)
+    outer.add_node("Market Analyst", inner.compile())
+    outer.add_edge(START, "Market Analyst")
+    outer.add_edge("Market Analyst", END)
+    result = outer.compile().invoke(
+        {"count": 0, "market_report": "", "messages": []}, config={"callbacks": [observer]}
+    )
+    assert result["market_report"] == "done"
+    assert observer.agents["Market Analyst"].turns == 2
+    assert observer.agents["Market Analyst"].status == "completed"
+    assert not observer._analyst_scopes and not observer._analyst_turn_counts
+    assert observer.console.file.getvalue().count("Market Analyst: completed") == 1
+
+
+def test_checkpoint_progress_uses_upstream_manager_fields(observer):
+    start_node(observer, "Trader", {
+        "investment_plan": "decision",
+        "investment_debate_state": {"bull_history": "bull", "bear_history": "bear"},
+    })
+    assert observer.agents["Bull Researcher"].status == "completed"
+    assert observer.agents["Bear Researcher"].status == "completed"

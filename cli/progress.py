@@ -87,6 +87,8 @@ class AnalysisProgress(StatsCallbackHandler):
         self._state_lock = RLock()
         self._root = None
         self._nodes: dict = {}
+        self._analyst_scopes: dict = {}
+        self._analyst_turn_counts: dict = {}
 
     def _event(self, text: str) -> None:
         self.activity.append(text)
@@ -124,7 +126,9 @@ class AnalysisProgress(StatsCallbackHandler):
             if isinstance(debate, dict):
                 for name, field in zip(names, fields, strict=True):
                     if debate.get(field) and self.agents[name].started is None:
-                        self.agents[name].status = "completed" if debate.get("judge_decision") else "waiting"
+                        judged = (state.get("investment_plan") if key == "investment_debate_state"
+                                  else state.get("final_trade_decision"))
+                        self.agents[name].status = "completed" if judged or debate.get("judge_decision") else "waiting"
 
     def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, metadata=None, **kwargs):
         with self._state_lock:
@@ -134,12 +138,41 @@ class AnalysisProgress(StatsCallbackHandler):
                 self._observe_state(inputs)
                 return
             node = (metadata or {}).get("langgraph_node")
-            # Only direct graph nodes, not nested prompts, parsers or router chains.
+            # Parallel analysts own a nested LangGraph. Follow only its graph
+            # wrapper and agent/tool steps, never prompts or parser chains.
+            if parent_run_id in self._analyst_scopes:
+                owner, scope = self._analyst_scopes[parent_run_id]
+                if kwargs.get("name") == "LangGraph":
+                    self._analyst_scopes[run_id] = (owner, scope)
+                    return
+                if kwargs.get("name") != node or node not in {"agent", "wrap_up", "tools"}:
+                    return
+                self._observe_state(inputs)
+                if node == "tools":
+                    key = next(key for key, (name, _) in _ANALYSTS.items() if name == owner)
+                    self._nodes[run_id] = f"tools_{key}"
+                    self.phase = f"Fetching data: {owner}"
+                    return
+                self._nodes[run_id] = owner
+                row = self.agents[owner]
+                # The outer analyst start already counted its first turn.
+                if self._analyst_turn_counts[scope]:
+                    row.turns += 1
+                    self._event(f"{owner}: running (turn {row.turns})")
+                self._analyst_turn_counts[scope] += 1
+                row.status = "running"
+                if row.started is None:
+                    row.started = monotonic()
+                self.phase = owner
+                return
             if parent_run_id != self._root or kwargs.get("name") != node:
                 return
             if node not in self.agents and node not in {f"tools_{key}" for key in _ANALYSTS}:
                 return
             self._nodes[run_id] = node
+            if node in {name for name, _ in _ANALYSTS.values()}:
+                self._analyst_scopes[run_id] = (node, run_id)
+                self._analyst_turn_counts[run_id] = 0
             self._observe_state(inputs)
             if node.startswith("tools_"):
                 self.phase = f"Fetching data: {_ANALYSTS[node[6:]][0]}"
@@ -161,6 +194,9 @@ class AnalysisProgress(StatsCallbackHandler):
 
     def on_chain_end(self, outputs, *, run_id, **kwargs):
         with self._state_lock:
+            scope = self._analyst_scopes.pop(run_id, None)
+            if scope is not None and scope[1] == run_id:
+                self._analyst_turn_counts.pop(run_id, None)
             if run_id == self._root:
                 self._observe_state(outputs)
                 self.phase = "Finalizing analysis"
@@ -168,6 +204,9 @@ class AnalysisProgress(StatsCallbackHandler):
             node = self._nodes.pop(run_id, None)
             if node is None:
                 return
+            completed_outer = (scope is not None and scope[1] == run_id
+                               and node in self.agents
+                               and self.agents[node].status == "completed")
             self._observe_state(outputs)
             if node not in self.agents:
                 return
@@ -176,10 +215,16 @@ class AnalysisProgress(StatsCallbackHandler):
             tool_calls = last.get("tool_calls") if isinstance(last, dict) else getattr(last, "tool_calls", None)
             status = "waiting" if node in _LOOP_AGENTS or tool_calls else "completed"
             self._finish_turn(node, status)
-            self._event(f"{node}: {'turn complete' if status == 'waiting' else 'completed'}")
+            # The inner final agent step already announced its completion.
+            # The outer subgraph still consumes its result and clears scopes.
+            if not (completed_outer and status == "completed"):
+                self._event(f"{node}: {'turn complete' if status == 'waiting' else 'completed'}")
 
     def on_chain_error(self, error, *, run_id, **kwargs):
         with self._state_lock:
+            scope = self._analyst_scopes.pop(run_id, None)
+            if scope is not None and scope[1] == run_id:
+                self._analyst_turn_counts.pop(run_id, None)
             node = self._nodes.pop(run_id, None)
             if node in self.agents:
                 self._finish_turn(node, "error")

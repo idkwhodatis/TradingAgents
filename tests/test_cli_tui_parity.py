@@ -370,3 +370,92 @@ def test_cancelling_thinking_settings_aborts_before_saving_preferences(
     with pytest.raises(main.typer.Abort):
         selections_module.get_user_selections()
     saved.assert_not_called()
+
+
+@pytest.mark.parametrize("gateway,model", [("opencode-go", "gpt-6-luna"), ("commandcode", "claude-sonnet-5-5")])
+def test_tui_configures_gateway_when_only_one_tier_uses_it(parity_setup, monkeypatch, gateway, model):
+    config, _, _ = parity_setup
+    config.update(deep_think_provider=gateway, deep_think_llm=model)
+    monkeypatch.setenv("TRADINGAGENTS_DEEP_THINK_LLM", model)
+    _stub_wizard(monkeypatch, "google")
+    google = Mock(return_value="high")
+    openai = Mock(return_value="medium")
+    anthropic = Mock(return_value="max")
+    protocol = Mock(return_value="auto")
+    monkeypatch.setattr(selections_module, "ask_gemini_thinking_config", google)
+    monkeypatch.setattr(selections_module, "ask_openai_reasoning_effort", openai)
+    monkeypatch.setattr(selections_module, "ask_anthropic_effort", anthropic)
+    monkeypatch.setattr(selections_module, "ask_provider_api", protocol)
+    selected = selections_module._prompt_selections({})
+    protocol.assert_called_once_with(gateway, [model], "auto")
+    google.assert_called_once_with()
+    assert selected["google_thinking_level"] == "high"
+    if gateway == "opencode-go":
+        openai.assert_called_once_with()
+        assert selected["openai_reasoning_effort"] == "medium"
+    else:
+        anthropic.assert_called_once_with()
+        assert selected["anthropic_effort"] == "max"
+
+
+def test_provider_switch_clears_implicit_tier_routes_but_keeps_explicit_tiers(parity_setup):
+    config, _, _ = parity_setup
+    config.update(
+        quick_think_backend_url="https://old-gateway.example/v1",
+        quick_think_llm_headers={"X-Old-Secret": "private"},
+        deep_think_provider="commandcode",
+        deep_think_backend_url="https://explicit-gateway.example/v1",
+        deep_think_llm_headers={"X-Explicit-Secret": "private"},
+    )
+    chosen = _chosen(llm_provider="anthropic")
+    for result in (
+        native._build_run_config(chosen, None),
+        headless.build_headless_config(config, llm_provider="anthropic", quick_think_llm="q", deep_think_llm="d"),
+    ):
+        assert result["quick_think_backend_url"] is None
+        assert result["quick_think_llm_headers"] is None
+        assert result["deep_think_provider"] == "commandcode"
+        assert result["deep_think_backend_url"] == config["deep_think_backend_url"]
+        assert result["deep_think_llm_headers"] == config["deep_think_llm_headers"]
+
+
+def test_headless_summary_and_report_name_actual_tier_providers(parity_setup):
+    config, _, runner = parity_setup
+    config.update(deep_think_provider="commandcode", deep_think_llm="claude-sonnet-5-5")
+    result = runner.invoke(main.app, ["analyze", "NVDA", "--json"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    assert summary["quick_provider"] == "openai"
+    assert summary["deep_provider"] == "commandcode"
+    report = Path(summary["report"]).read_text()
+    assert "deep commandcode claude-sonnet-5-5" in report
+    assert Path(summary["report"]).with_suffix(".html").is_file()
+
+
+def test_streamed_subgraph_messages_and_partial_reports_survive_to_export(parity_setup, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    config, graphs, runner = parity_setup
+    create = headless._create_graph
+
+    def factory(*args, **kwargs):
+        graph = create(*args, **kwargs)
+
+        def stream_run(*args, **kwargs):
+            message = AIMessage(content="private analyst event", id="nested-message")
+            yield [message], None
+            yield [message], {"market_report": "early analyst report"}
+            path = Path(config["results_dir"]) / "NVDA" / "2026-09-27"
+            assert (path / "reports" / "market_report.md").read_text() == "early analyst report"
+            yield [], {"final_trade_decision": "Structured rating wins over text Rating: Sell", "final_rating": "Overweight"}
+        graph.stream_run = stream_run
+        return graph
+
+    monkeypatch.setattr(headless, "_create_graph", factory)
+    result = runner.invoke(main.app, ["analyze", "NVDA", "--analysts", "market", "--json"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    assert summary["decision"] == "Overweight"
+    assert "early analyst report" in Path(summary["report"]).read_text()
+    assert Path(summary["log_file"]).read_text().count("private analyst event") == 1
+    assert [call[0] for call in graphs[0].calls].count("json") == 1

@@ -58,6 +58,7 @@ With the default results root, an example historical run writes:
 └── reports/
     └── GOOG_<YYYYMMDD_HHMMSS>/
         ├── complete_report.md
+        ├── complete_report.html
         ├── 1_analysts/
         ├── 2_research/
         ├── 3_trading/
@@ -72,7 +73,7 @@ There are **two native report locations**, serving different purposes:
    end. An interrupted/failed run retains the sections already generated.
    Only selected/generated sections are written.
 2. `<results_dir>/reports/<symbol>_<timestamp>` is the interactive **Save report?**
-   default export location: the consolidated Markdown report and team subfolders.
+   default export location: the consolidated Markdown and HTML reports and team subfolders.
    Headless mode defaults to the equivalent of answering Yes and accepting that
    path. `--output-dir` selects an explicit export path; `--no-save-report` skips
    this extra export, not the native incremental files/log.

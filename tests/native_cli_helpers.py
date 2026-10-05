@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+
 
 class RecordingGraph:
     def __init__(self, selected_analysts, config, callbacks=None):
@@ -42,6 +44,10 @@ class RecordingGraph:
 
     def get_graph_args(self, callbacks=None):
         return {"stream_mode": "values", "config": {"recursion_limit": 100, "callbacks": callbacks or []}}
+
+    def stream_run(self, graph_input, **kwargs):
+        for state in self.stream(graph_input, **kwargs):
+            yield state.get("messages", []), state
 
     def stream(self, graph_input, **kwargs):
         self.calls.append(("stream", graph_input, kwargs))
@@ -89,7 +95,7 @@ class RecordingGraph:
             ("Research Manager", {"investment_debate_state": {"bull_history": "bull", "bear_history": "bear", "judge_decision": "research"}, "investment_plan": "research"}),
             ("Trader", {"trader_investment_plan": "trade"}),
             ("Aggressive Analyst", {"risk_debate_state": {"aggressive_history": "aggressive"}}),
-            ("Portfolio Manager", {"risk_debate_state": {"aggressive_history": "aggressive", "conservative_history": "conservative", "neutral_history": "neutral", "judge_decision": self.decision}, "final_trade_decision": self.decision}),
+            ("Portfolio Manager", {"risk_debate_state": {"aggressive_history": "aggressive", "conservative_history": "conservative", "neutral_history": "neutral", "judge_decision": self.decision}, "final_trade_decision": self.decision, "final_rating": self.decision}),
         ):
             for cb in self.observed:
                 cb.on_chain_start(None, state, run_id=name, parent_run_id="root", name=name,
@@ -108,6 +114,7 @@ class RecordingGraph:
         (directory / f"full_states_log_{trade_date}.json").write_text(json.dumps(state, default=str), encoding="utf-8")
 
     def record_decision(self, ticker, trade_date, state):
+        self._log_state(trade_date, state)
         self.calls.append(("record", ticker, trade_date, state["final_trade_decision"]))
 
     def clear_checkpoint_on_success(self, *args):
@@ -115,3 +122,11 @@ class RecordingGraph:
 
     def process_signal(self, text):
         return text if text in {"Buy", "Hold", "Sell"} else "REVIEW"
+
+    @property
+    def selected_analysts(self):
+        return self.selected
+
+    run_settings = TradingAgentsGraph.run_settings
+    default_report_path = TradingAgentsGraph.default_report_path
+    save_reports = TradingAgentsGraph.save_reports

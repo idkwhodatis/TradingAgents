@@ -1,36 +1,45 @@
-"""Both CLI paths use the graph's ordinary decision log and checkpoint lifecycle."""
+"""Both CLI paths use the graph's ordinary memory log and checkpoint lifecycle."""
 
 from __future__ import annotations
 
 import pytest
 
 import cli.run as cli_run
-from tradingagents.decision_log import TradingMemoryLog
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.memory import TradingMemoryLog
 
 
 def _bare_graph(tmp_path):
     graph = object.__new__(TradingAgentsGraph)
     graph.config = {"memory_log_path": str(tmp_path / "trading_memory.md")}
     graph.memory_log = TradingMemoryLog(graph.config)
+    graph._log_state = lambda *a: None   # these tests are about the memory log
     return graph
 
 
 @pytest.mark.unit
-def test_create_run_state_settles_pending_and_carries_context(tmp_path, monkeypatch):
+def test_memory_step_settles_pending_and_carries_context(tmp_path, monkeypatch):
     from tradingagents.graph.propagation import Propagator
 
     graph = _bare_graph(tmp_path)
     graph.propagator = Propagator()
     settled = []
-    monkeypatch.setattr(graph, "settle_pending", settled.append, raising=False)
+    from types import SimpleNamespace
+
+    def settle_all(wait=True):
+        settled.append(wait)
+        return SimpleNamespace(failed=[])
+
+    monkeypatch.setattr(graph, "settle_all_pending", settle_all, raising=False)
     monkeypatch.setattr(graph, "resolve_instrument_context", lambda t, a="stock", d=None: f"id:{t}", raising=False)
     monkeypatch.setattr(graph, "_memory_as_of", lambda d: d, raising=False)
     graph.memory_log.store_decision("NVDA", "2026-01-05", "Rating: Buy\nold call")
     graph.memory_log.update_with_outcome("NVDA", "2026-01-05", 0.01, 0.005, 5, "great trade", "2026-01-12")
     state = graph.create_run_state("NVDA", "2026-02-01")
-    assert settled == ["NVDA"]
-    assert "great trade" in state["past_context"]
+    assert settled == []  # Memory work runs alongside analysts, not during setup.
+    memory = graph._memory_step(state)
+    assert settled == [False]
+    assert "great trade" in memory["past_context"]
     assert state["instrument_context"] == "id:NVDA"
     assert state["company_of_interest"] == "NVDA"
 
@@ -72,6 +81,7 @@ class _FakeGraph:
         self.calls.append(("log_state", trade_date, final_state.get("market_report")))
 
     def record_decision(self, ticker, trade_date, final_state):
+        self._log_state(trade_date, final_state)
         self.calls.append(("record_decision", ticker, trade_date, final_state.get("final_trade_decision")))
 
     def get_graph_args(self, callbacks=None):
@@ -90,10 +100,9 @@ class _FakeGraph:
     def end_checkpoint(self):
         pass
 
-    def stream(self, graph_input, **kwargs):
-        assert kwargs["stream_mode"] == "values"
-        yield {"messages": [], "market_report": "M"}
-        yield {"messages": [], "market_report": "M", "final_trade_decision": "Rating: Buy\n\nBuy NVDA."}
+    def stream_run(self, graph_input, **kwargs):
+        yield [], {"messages": [], "market_report": "M"}
+        yield [], {"messages": [], "final_trade_decision": "Rating: Buy\n\nBuy NVDA.", "final_rating": "Buy"}
 
 
 class _NullLive:
@@ -142,7 +151,7 @@ def _run_cli(monkeypatch, tmp_path, fake):
     monkeypatch.setattr(cli_run, "create_layout", lambda: None)
     monkeypatch.setattr(cli_run, "update_display", lambda *a, **k: None)
     monkeypatch.setattr(cli_run, "Live", _NullLive)
-    monkeypatch.setattr(cli_run, "get_user_selections", lambda: {
+    monkeypatch.setattr(cli_run, "get_user_selections", lambda flags=None: {
         "ticker": "NVDA", "analysis_date": "2026-01-10",
         "analysts": [AnalystType.MARKET], "asset_type": "stock",
     })
@@ -155,7 +164,7 @@ def _run_cli(monkeypatch, tmp_path, fake):
 
 
 @pytest.mark.unit
-def test_cli_run_uses_the_decision_log_like_propagate(tmp_path, monkeypatch):
+def test_cli_run_uses_the_memory_log_like_propagate(tmp_path, monkeypatch):
     fake = _FakeGraph()
     _run_cli(monkeypatch, tmp_path, fake)
     assert fake.calls == [
@@ -177,3 +186,26 @@ def test_the_cli_run_says_whether_it_resumed(tmp_path, monkeypatch, resuming, sa
 def test_a_run_without_checkpointing_says_nothing_about_resuming(tmp_path, monkeypatch):
     buffer = _run_cli(monkeypatch, tmp_path, _FakeGraph())
     assert not any("resum" in text.lower() or "fresh" in text.lower() for _, _, text in buffer.messages)
+
+
+@pytest.mark.unit
+def test_recording_a_run_writes_its_state_log(tmp_path):
+    """The CLI records a run through record_decision, so the state log is written there."""
+    graph = object.__new__(TradingAgentsGraph)
+    graph.config = {"results_dir": str(tmp_path), "llm_provider": "openai", "deep_think_llm": "d",
+                    "quick_think_llm": "q", "max_debate_rounds": 1, "max_risk_discuss_rounds": 1,
+                    "output_language": "English", "data_vendors": {}, "tool_vendors": {}}
+    graph.selected_analysts = ("market",)
+    graph.memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "m.md")})
+    state = {"company_of_interest": "NVDA", "trade_date": "2026-09-23", "market_report": "M",
+             "sentiment_report": "", "news_report": "", "fundamentals_report": "",
+             "investment_debate_state": {"bull_history": "", "bear_history": "", "history": "",
+                                         "current_response": ""},
+             "trader_investment_plan": "T", "investment_plan": "P",
+             "risk_debate_state": {"aggressive_history": "", "conservative_history": "",
+                                   "neutral_history": "", "history": ""},
+             "final_trade_decision": "**Rating**: Hold", "final_rating": "Hold"}
+
+    graph.record_decision("NVDA", "2026-09-23", state)
+
+    assert list(tmp_path.glob("NVDA/TradingAgentsStrategy_logs/full_states_log_2026-09-23.json"))

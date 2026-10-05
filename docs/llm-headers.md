@@ -5,14 +5,14 @@ Azure accept custom HTTP headers through the standard configuration path.
 These are transport headers, not `extra_body`/model parameters.
 
 ```dotenv
-TRADINGAGENTS_LLM_HEADERS='{"User-Agent":"TradingAgents/0.5.1","X-Custom-Header":"value"}'
+TRADINGAGENTS_LLM_HEADERS='{"User-Agent":"TradingAgents/0.6.0","X-Custom-Header":"value"}'
 ```
 
 Or, before constructing `TradingAgentsGraph`:
 
 ```python
 config["llm_headers"] = {
-    "User-Agent": "TradingAgents/0.5.1",
+    "User-Agent": "TradingAgents/0.6.0",
     "X-Custom-Header": "value",
 }
 ```
@@ -34,3 +34,12 @@ session header, reuse the same value for one conversation and its retries;
 use a different value for an independent conversation. Treat headers as
 potential credentials: keep real values in an untracked `.env` or a secret
 manager, not in source code or committed examples.
+
+## Different providers per model tier
+
+Shared `llm_headers` belong to `llm_provider`. A quick or deep tier using a
+different provider never inherits them. Set `quick_think_llm_headers` or
+`deep_think_llm_headers` explicitly for that tier (environment variables
+`TRADINGAGENTS_QUICK_THINK_LLM_HEADERS` and `TRADINGAGENTS_DEEP_THINK_LLM_HEADERS`).
+These accept the same JSON object format. An empty object disables inherited
+headers for a tier on the shared provider. Do not put secrets in report content.

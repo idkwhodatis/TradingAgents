@@ -14,7 +14,9 @@ from cli.headless import (
     build_headless_config,
     run_headless_analysis,
 )
+from cli.models import AnalystType, AssetType
 from cli.progress import resolve_progress_mode
+from cli.prompts import filter_analysts_for_asset_type, parse_analysts
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -65,14 +67,25 @@ def analyze(
             "portfolio agents size against your actual position.",
         ),
     ] = None,
+    ticker: Annotated[str | None, typer.Option("--ticker", help="Ticker to analyze; skips the prompt.")] = None,
+    date: Annotated[str | None, typer.Option("--date", help="Analysis date, YYYY-MM-DD; skips the prompt.")] = None,
+    analysts: Annotated[str | None, typer.Option("--analysts", help="Comma-separated analysts; skips the prompt.")] = None,
+    save: Annotated[bool | None, typer.Option("--save/--no-save", help="Save the report without asking.")] = None,
+    show: Annotated[bool | None, typer.Option("--show/--no-show", help="Show the full report without asking.")] = None,
+    html: Annotated[bool | None, typer.Option("--html/--no-html", help="Also save complete_report.html (default: yes).")] = None,
 ):
-    """Run an analysis. This is what a bare `tradingagents` does."""
+    """Run an analysis. This is what a bare `tradingagents` does.
+
+    Flags answer their questions; with provider, models, depth and language also
+    set through TRADINGAGENTS_* variables, the run asks nothing.
+    """
     if ctx.invoked_subcommand is not None:
         if ctx.invoked_subcommand == "analyze" and (
             checkpoint is not None or clear_checkpoints or portfolio is not None
+            or any(value is not None for value in (ticker, date, analysts, save, show, html))
         ):
             raise typer.BadParameter(
-                "Put --checkpoint/--no-checkpoint, --clear-checkpoints and --portfolio after 'analyze'."
+                "Put analysis options after 'analyze'; use its SYMBOL argument and --save-report/--show-report flags."
             )
         return
     if clear_checkpoints:
@@ -89,7 +102,8 @@ def analyze(
             raise typer.Exit(code=1) from None
 
     try:
-        run_analysis(checkpoint=checkpoint, portfolio=portfolio_context)
+        flags = {"ticker": ticker, "date": date, "analysts": analysts, "save": save, "show": show, "html": html}
+        run_analysis(checkpoint=checkpoint, portfolio=portfolio_context, flags=flags)
     except _NO_CONSOLE_ERRORS:
         # A terminal with no console buffer cannot host the interactive prompts.
         # Emit one actionable line on stderr instead of a prompt_toolkit
@@ -131,6 +145,11 @@ def backtest(
     try:
         dates = iter_grid(start, end, every)
         book = load_portfolio(portfolio) if portfolio else None
+        kind = AssetType(asset_type.strip().lower())
+        # The analysts are named and checked as for an analysis; without a
+        # choice, every analyst the asset type allows runs.
+        chosen = (parse_analysts(analysts, kind) if analysts
+                  else filter_analysts_for_asset_type(list(AnalystType), kind))
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
@@ -140,9 +159,11 @@ def backtest(
         console.print("[red]No ticker to analyze; pass them comma-separated, e.g. NVDA,AAPL[/red]")
         raise typer.Exit(code=1)
 
-    kwargs = {"asset_type": asset_type, "portfolio": book, "run_id": run_id}
-    if analysts:
-        kwargs["selected_analysts"] = [a.strip().lower() for a in analysts.split(",") if a.strip()]
+    def show_progress(done, total, ticker, date):
+        console.print(f"[dim][{done}/{total}] {ticker} {date}[/dim]")
+
+    kwargs = {"asset_type": kind.value, "portfolio": book, "run_id": run_id, "progress": show_progress,
+              "selected_analysts": [a.value for a in chosen]}
 
     try:
         result = run_backtest(names, dates, DEFAULT_CONFIG, **kwargs)
@@ -153,6 +174,7 @@ def backtest(
     console.print(
         f"\nRan {result.cells_run} cells, skipped {result.skipped}. Log: {result.log_path}"
     )
+    console.print(f"Continue or settle this sweep: --run-id {result.run_id}")
     for ticker, date, reason in result.failures:
         console.print(f"[yellow]failed:[/yellow] {ticker} {date}: {reason}")
     for ticker, reason in result.settlement_failures:
@@ -307,6 +329,7 @@ def analyze_headless(
             help="Display the complete report after saving, without prompting. Uses stderr; --json stdout stays clean.",
         ),
     ] = False,
+    html: Annotated[bool, typer.Option("--html/--no-html", help="Also export a self-contained HTML report.")] = True,
     json_output: Annotated[
         bool,
         typer.Option(
@@ -358,6 +381,7 @@ def analyze_headless(
                 progress_mode=progress_mode,
                 show_report=show_report,
                 save_report=save_report,
+                html=html,
                 clear_checkpoints=clear_checkpoints,
             )
     except Exception as exc:

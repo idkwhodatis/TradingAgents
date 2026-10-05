@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import webbrowser
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,16 +27,15 @@ from cli.display import (
     update_display,
     update_research_team_status,
 )
-from cli.run_output import default_export_directory, persist_run_buffer, run_directory
-from cli.selections import get_user_selections
+from cli.run_output import persist_run_buffer, run_directory
+from cli.selections import depth_from_env, get_user_selections, unattended_gaps
 from cli.stats_handler import StatsCallbackHandler
-from tradingagents.agents.rating import is_review
+from tradingagents.agents.rating import is_review, run_rating
 from tradingagents.dataflows.config import run_config
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.analyst_execution import build_analyst_execution_plan
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.reporting import write_report_tree
 
 # The native dashboard uses a shared buffer. Serialize in-process CLI runs and
 # protect rendering against concurrent deque updates. SDK work may use threads;
@@ -50,6 +50,7 @@ class AnalysisResult:
     directory: Path
     report: Path | None = None
     progress: object | None = None
+    graph: object | None = None
 
 
 def _run_directory(config: dict, ticker: str, trade_date: str) -> Path:
@@ -69,13 +70,13 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     config = DEFAULT_CONFIG.copy()
     for env_var, key in (("TRADINGAGENTS_MAX_DEBATE_ROUNDS", "max_debate_rounds"),
                          ("TRADINGAGENTS_MAX_RISK_ROUNDS", "max_risk_discuss_rounds")):
-        if os.environ.get(env_var):
+        if not os.environ.get(env_var):
+            config[key] = selections["research_depth"]
+        elif not depth_from_env():
             console.print(
                 f"[green]✓ {key} from environment:[/green] {config[key]} "
                 f"(set by {env_var}, so the research depth you chose does not apply to it)"
             )
-        else:
-            config[key] = selections["research_depth"]
     config["quick_think_llm"] = selections["quick_think_llm"]
     config["deep_think_llm"] = selections["deep_think_llm"]
     config["backend_url"] = selections["backend_url"]
@@ -84,6 +85,10 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
         # Match the prompt-free path: custom authentication/routing headers
         # belong to the configured provider and must not follow a menu switch.
         config["llm_headers"] = None
+        for tier in ("quick", "deep"):
+            if not DEFAULT_CONFIG.get(f"{tier}_think_provider"):
+                config[f"{tier}_think_backend_url"] = None
+                config[f"{tier}_think_llm_headers"] = None
     # A provider without its own reasoning prompt (e.g. Go) must not erase
     # a reasoning option that DEFAULT_CONFIG already read from the environment.
     for key in ("google_thinking_level", "openai_reasoning_effort", "anthropic_effort"):
@@ -104,7 +109,13 @@ def _consume_state(chunk: dict, tracker, seen_without_ids: set) -> None:
     Called for full `values` snapshots by BOTH CLI entry points. Canonical
     completed sections supersede temporary research/risk debate previews.
     """
-    for index, message in enumerate(chunk.get("messages", [])):
+    _consume_messages(chunk.get("messages", []), seen_without_ids)
+    _consume_reports(chunk, tracker)
+
+
+def _consume_messages(messages, seen_without_ids: set) -> None:
+    """Journal top-level and analyst subgraph messages without duplicate snapshots."""
+    for index, message in enumerate(messages):
         msg_id = getattr(message, "id", None)
         if msg_id is not None:
             if msg_id in message_buffer._processed_message_ids:
@@ -127,10 +138,12 @@ def _consume_state(chunk: dict, tracker, seen_without_ids: set) -> None:
             else:
                 message_buffer.add_tool_call(call.name, call.args)
 
+
+def _consume_reports(chunk: dict, tracker) -> None:
     update_analyst_statuses(message_buffer, chunk, wall_time_tracker=tracker)
     debate = chunk.get("investment_debate_state") or {}
-    bull, bear, judge = (debate.get(key, "").strip()
-                         for key in ("bull_history", "bear_history", "judge_decision"))
+    bull, bear = (debate.get(key, "").strip() for key in ("bull_history", "bear_history"))
+    judge = (chunk.get("investment_plan") or debate.get("judge_decision") or "").strip()
     if judge:
         update_research_team_status("completed")
         if message_buffer.agent_status.get("Trader") == "pending":
@@ -161,7 +174,7 @@ def _consume_state(chunk: dict, tracker, seen_without_ids: set) -> None:
             if message_buffer.agent_status.get(agent) != "completed":
                 message_buffer.update_agent_status(agent, "in_progress")
             preview = f"### {agent} Analysis\n{history}"
-    judge = risk.get("judge_decision", "").strip()
+    judge = (chunk.get("final_trade_decision") or risk.get("judge_decision") or "").strip()
     if judge:
         preview = f"### Portfolio Manager Decision\n{judge}"
         for agent in ("Aggressive Analyst", "Conservative Analyst", "Neutral Analyst", "Portfolio Manager"):
@@ -224,31 +237,36 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
                              refresh_per_second=4, transient=True)
                         if mode == "live" else nullcontext())
                 with live:
-                    message_buffer.update_agent_status(plan.specs[0].agent_node, "in_progress")
-                    tracker.mark_started(selected[0])
+                    for spec in plan.specs:
+                        message_buffer.update_agent_status(spec.agent_node, "in_progress")
+                        tracker.mark_started(spec.key)
                     try:
                         init_state = graph.create_run_state(ticker, trade_date, selections["asset_type"], portfolio)
                         checkpoint_tid = graph.begin_checkpoint(ticker, trade_date, selections["asset_type"], portfolio)
                         if checkpoint_tid is not None:
                             _announce_checkpoint_state(graph, ticker, trade_date)
                         args = graph.propagator.get_graph_args(callbacks=[stats])
-                        # Full state snapshots: retaining just the latest avoids
-                        # accumulating every copy of the growing debate history.
-                        args["stream_mode"] = "values"
                         if checkpoint_tid is not None:
                             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = checkpoint_tid
                         final_state = None
                         seen_without_ids = set()
-                        for chunk in graph.graph.stream(graph.checkpoint_input(init_state), **args):
+                        for messages, chunk in graph.stream_run(graph.checkpoint_input(init_state), **args):
                             with lock:
-                                _consume_state(chunk, tracker, seen_without_ids)
+                                _consume_messages(messages, seen_without_ids)
+                                if chunk is not None:
+                                    _consume_reports(chunk, tracker)
+                            if chunk is None:
+                                continue
                             if chunk.get("__interrupt__"):
                                 raise RuntimeError("Analysis paused at an interrupt; checkpoint retained")
-                            final_state = chunk
+                            # stream_run includes analyst report deltas as well as
+                            # top-level values; keep one merged state, not a trace.
+                            if final_state is None:
+                                final_state = {}
+                            final_state.update(chunk)
                         if final_state is None:
                             raise RuntimeError("Analysis produced no state; checkpoint retained")
                         # One shared completion path: JSON state, memory, checkpoint.
-                        graph._log_state(trade_date, final_state)
                         graph.record_decision(ticker, trade_date, final_state)
                         graph.clear_checkpoint_on_success(ticker, trade_date, selections["asset_type"], portfolio)
                     finally:
@@ -261,9 +279,9 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
                                 message_buffer.update_report_section(section, final_state[section])
                         message_buffer.add_message("System", f"Completed analysis for {trade_date}")
                         message_buffer.add_message("System", tracker.format_summary())
-                decision = graph.process_signal(final_state.get("final_trade_decision", ""))
+                decision = run_rating(final_state)
                 return AnalysisResult(final_state, decision, directory,
-                                      progress=stats if mode == "plain" else None)
+                                      progress=stats if mode == "plain" else None, graph=graph)
             except BaseException as exc:
                 # Preserve partial reports; log the failure type, not potentially
                 # credential-bearing provider exception text. CLI reports it.
@@ -275,10 +293,10 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
                 raise
 
 
-def run_analysis(checkpoint: bool | None = None, portfolio=None, *, selections=None,
+def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, selections=None,
                  config=None, interactive=True, output_dir: Path | None = None,
                  progress_mode: str | None = None, show_report=False,
-                 save_report=True, clear_checkpoints=False,
+                 save_report=True, html: bool | None = None, clear_checkpoints=False,
                  graph_factory=None) -> AnalysisResult:
     """Use the same native CLI workflow, optionally with pre-resolved inputs.
 
@@ -289,7 +307,14 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, *, selections=N
     if selections is None:
         if not interactive:
             raise ValueError("Headless analysis requires resolved selections")
-        selections = get_user_selections()
+        if not (sys.stdin and sys.stdin.isatty()):
+            gaps = unattended_gaps(flags or {})
+            if gaps:
+                console.print("[red]No terminal to answer the setup questions. Set:[/red]")
+                for gap in gaps:
+                    console.print(f"  {gap}")
+                raise typer.Exit(code=1)
+        selections = get_user_selections(flags) if flags is not None else get_user_selections()
     if config is None:
         config = _build_run_config(selections, checkpoint)
     mode = progress_mode if progress_mode is not None else ("live" if interactive else "off")
@@ -300,36 +325,108 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, *, selections=N
         typer.echo(f"Cleared {count} checkpoint(s).", err=True)
     result = _execute_analysis(selections, config, portfolio, mode, graph_factory or _default_graph_factory)
 
-    save = save_report
-    export_path = Path(output_dir).expanduser() if output_dir is not None else default_export_directory(config, selections["ticker"])
+    flags = flags or {}
     if interactive:
         console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
         if is_review(result.decision):
             console.print("[yellow]No rating could be read. Review the saved decision text rather than treating it as a position.[/yellow]")
-        save = typer.prompt("Save report?", default="Y").strip().upper() in ("Y", "YES", "")
-        if save:
-            export_path = Path(typer.prompt("Save path (press Enter for default)", default=str(export_path)).strip()).expanduser()
-    if save:
-        if result.progress is not None:
-            result.progress.stage("Saving reports")
-        try:
-            result.report = write_report_tree(result.final_state, selections["ticker"], export_path).resolve()
-        except Exception as exc:
-            if result.progress is not None:
-                result.progress.fail(exc)
-            if not interactive:
-                raise  # Headless callers must not emit success after a save failure.
-            console.print(f"[red]Error saving report: {exc}[/red]")
-        else:
-            if result.progress is not None:
-                result.progress.complete()
-            if interactive:
-                console.print(f"\n[green]✓ Report saved to:[/green] {result.report.parent}")
-                console.print(f"  [dim]Complete report:[/dim] {result.report.name}")
-    if not save and result.progress is not None:
-        result.progress.stage("Completed; incremental reports saved")
-    if interactive:
-        show_report = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper() in ("Y", "YES", "")
-    if show_report:
-        display_complete_report(result.final_state)
+    result.report = _offer_reports(
+        result.final_state, result.graph, selections["ticker"],
+        save=flags.get("save") if interactive else save_report,
+        show=flags.get("show") if interactive else show_report,
+        html=flags.get("html", html) if interactive else html,
+        output_dir=output_dir, progress=result.progress, strict=not interactive,
+        announce=interactive,
+    )
     return result
+
+
+def _yes(question: str) -> bool:
+    return typer.prompt(question, default="Y").strip().upper() in ("Y", "YES", "")
+
+
+def _graphical_browser():
+    """A browser that opens a page in its own window on this machine, or None.
+
+    Over SSH the page sits on the remote machine, and a terminal browser (lynx,
+    w3m, elinks) would take over the terminal, so neither is offered.
+    """
+    if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):
+        return None
+    try:
+        browser = webbrowser.get()
+    except webbrowser.Error:
+        return None
+    if type(browser) is webbrowser.GenericBrowser or isinstance(browser, webbrowser.Elinks):
+        return None
+    return browser
+
+
+def _open_page(page: Path) -> None:
+    """Offer to open the saved page in a browser window, and say where it is if opening fails."""
+    browser = _graphical_browser()
+    if browser is None or not _yes("Open it in your browser?"):
+        return
+    try:
+        opened = browser.open(page.as_uri())
+    except (webbrowser.Error, OSError):
+        opened = False
+    if not opened:
+        console.print(f"  [dim]Could not open a browser; the page is at:[/dim] {page}")
+
+
+def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, *,
+                   output_dir=None, progress=None, strict=False, announce=True):
+    """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
+
+    A saved report includes the HTML page unless ``html`` is False. Someone
+    answering the save question at the prompt is also asked about the page and
+    offered to open it; a run whose flags answer the save question asks neither.
+    """
+    report_file = None
+    asked = save is None
+    if asked:
+        save = typer.prompt("Save report?", default="Y").strip().upper() in ("Y", "YES", "")
+    if save:
+        # Under results_dir, not the working directory: in Docker the working
+        # directory is inside the container and the report goes with it, while
+        # results_dir is the mounted volume the rest of the run already writes to.
+        save_path = (Path(output_dir).expanduser() if output_dir is not None
+                     else graph.default_report_path(ticker).expanduser())
+        if asked:   # someone at the prompt may pick another folder
+            save_path = Path(typer.prompt(
+                "Save path (press Enter for default)", default=str(save_path)
+            ).strip()).expanduser()
+        if html is None:
+            html = _yes("Also save it as an HTML page?") if asked else True
+        saved = False
+        if progress is not None:
+            progress.stage("Saving reports")
+        try:
+            report_file = graph.save_reports(final_state, ticker, save_path, html=html).resolve()
+            saved = True
+            if progress is not None and not strict:
+                progress.complete()
+            if announce:
+                console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
+                console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+        except Exception as exc:
+            if progress is not None:
+                progress.fail(exc)
+            if strict:
+                raise
+            console.print(f"[red]Error saving report: {exc}[/red]")
+        if saved and html:
+            page = (save_path / "complete_report.html").resolve()
+            if announce:
+                console.print(f"  [dim]HTML report:[/dim] {page.name}")
+            if asked:
+                _open_page(page)
+
+    if not save and progress is not None:
+        progress.stage("Completed; incremental reports saved")
+    if show is None:
+        show = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper() in ("Y", "YES", "")
+    if show:
+        display_complete_report(final_state)
+    return report_file
