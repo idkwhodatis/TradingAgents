@@ -4,6 +4,7 @@ Each dated tool takes the run's ``trade_date`` from graph state (``InjectedState
 and never serves data past it, whatever date the model asks for.
 """
 
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from langchain_core.tools import tool
@@ -13,6 +14,7 @@ from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 from tradingagents.dataflows.router import no_data_available, route_to_vendor, vendor_unavailable
 from tradingagents.dataflows.vendors.yahoo.snapshot import build_verified_market_snapshot
+from tradingagents.extensions.news_evidence import retrieve_news
 
 
 @tool
@@ -188,7 +190,10 @@ def get_news(
         start_date, end_date = as_of_window(start_date, end_date, trade_date)
     except ValueError as e:
         return str(e)
-    return route_to_vendor("get_news", ticker, start_date, end_date)
+    return retrieve_news(
+        lambda: route_to_vendor("get_news", ticker, start_date, end_date),
+        ticker, start_date, end_date,
+    )
 
 
 @tool
@@ -212,7 +217,16 @@ def get_global_news(
     Returns:
         str: A formatted string containing global news data
     """
-    return route_to_vendor("get_global_news", as_of(curr_date, trade_date), look_back_days, limit)
+    from tradingagents.dataflows.config import get_config
+
+    end_date = as_of(curr_date, trade_date)
+    days = look_back_days if look_back_days is not None else get_config()["global_news_lookback_days"]
+    start_date = (datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
+    return retrieve_news(
+        lambda: route_to_vendor("get_global_news", end_date, look_back_days, limit),
+        None, start_date, end_date,
+        limit=limit if limit is not None else get_config()["global_news_article_limit"],
+    )
 
 
 @tool

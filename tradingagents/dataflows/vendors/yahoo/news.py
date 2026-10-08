@@ -12,6 +12,7 @@ from tradingagents.dataflows.errors import VendorUnavailableError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import yf_retry
 from tradingagents.extensions.ashare_identity import identity_for, news_queries
+from tradingagents.extensions.news_evidence import NewsText
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -177,11 +178,14 @@ def get_news_yfinance(
         # across bilingual searches. Out-of-window hits cannot spend it.
         in_range = in_range[:article_limit]
     if in_range:
-        return (f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n"
-                f"{_format_articles(in_range)}{coverage_note}")
+        return NewsText(
+            f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n"
+            f"{_format_articles(in_range)}{coverage_note}",
+            sum(bool(a["pub_date"] and a["link"] and a["summary"] and a["title"] != "No title") for a in in_range),
+        )
 
     if not feed:
-        return (f"<Yahoo Finance news unavailable for {start_date}..{end_date}: Yahoo search "
+        return NewsText(f"<Yahoo Finance news unavailable for {start_date}..{end_date}: Yahoo search "
                 f"returns only a sample of recent articles about {canonical}, so this is not "
                 f"an absence of {subject}>{coverage_note}")
     gap = coverage_gap(
@@ -189,7 +193,7 @@ def get_news_yfinance(
         start_date, end_date, "Yahoo Finance news", subject,
     )
     result = gap or f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
-    return result + coverage_note
+    return NewsText(result + coverage_note)
 
 
 def get_global_news_yfinance(
@@ -254,6 +258,9 @@ def get_global_news_yfinance(
         # Results merge several fuzzy searches, so their timestamps prove no
         # continuous coverage; judge the window against the present only.
         gap = coverage_gap((), start_date, as_of_date, "Yahoo Finance global news", "market news")
-        return gap or f"No global news found between {start_date} and {as_of_date}"
+        return NewsText(gap or f"No global news found between {start_date} and {as_of_date}")
 
-    return f"## Global Market News, from {start_date} to {as_of_date}:\n\n{news_str}"
+    return NewsText(
+        f"## Global Market News, from {start_date} to {as_of_date}:\n\n{news_str}",
+        sum(bool(a["pub_date"] and a["link"] and a["summary"] and a["title"] != "No title") for a in in_window_news[:limit]),
+    )

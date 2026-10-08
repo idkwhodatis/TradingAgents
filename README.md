@@ -267,6 +267,12 @@ does not establish historical ticker or price availability. This does not
 guarantee official announcement or overseas-news coverage. See the [adapter source, configuration,
 coverage and upstream-sync guide](docs/ashare-identity-adapter.md).
 
+The shared news tools also support a configurable [source-screened DuckDuckGo
+fallback](docs/news-evidence.md) across markets, plus bounded CNInfo disclosure
+discovery for verified A-share names. Results carry actual retrieved excerpts,
+URLs, publication-date provenance and coverage gaps; search snippets are never
+labelled full article or filing text.
+
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>

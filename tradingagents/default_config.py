@@ -31,6 +31,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_ASHARE_IDENTITY_ENABLED": "ashare_identity_enabled",
     "TRADINGAGENTS_ASHARE_IDENTITY_TIMEOUT": "ashare_identity_timeout",
     "TRADINGAGENTS_ASHARE_IDENTITY_CACHE_TTL": "ashare_identity_cache_ttl",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_ENABLED": "duckduckgo_news_enabled",
+    "TRADINGAGENTS_ASHARE_ANNOUNCEMENTS_ENABLED": "ashare_announcements_enabled",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
@@ -176,6 +178,16 @@ def build_default_config() -> dict:
         "ashare_identity_enabled": True,
         "ashare_identity_timeout": 5.0,      # per HTTP request, seconds (0.1..30)
         "ashare_identity_cache_ttl": 86400,  # bounded in-process current-name cache
+        # Explicit optional search enrichment, separate from the primary vendor chain.
+        "duckduckgo_news_enabled": True,
+        "ashare_announcements_enabled": True,
+        "duckduckgo_news_timeout": 15.0,
+        "duckduckgo_news_total_timeout": 45.0,
+        "duckduckgo_news_max_queries": 4,
+        "duckduckgo_news_max_results": 10,
+        "duckduckgo_news_cache_ttl": 300,
+        "duckduckgo_news_region": "auto",
+        "duckduckgo_news_allowed_domains": [],
         # Data vendor configuration
         # Category-level configuration (default for all tools in category).
         # The configured value is the exact vendor chain — requests are NOT silently

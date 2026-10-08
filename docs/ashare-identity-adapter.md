@@ -108,7 +108,11 @@ IPO or delisting dates and does not infer trading eligibility from the prefix.
 
 `retrieval_queries` separates official-announcement search suggestions from
 English/overseas-news suggestions. Both explicitly say `evidence_retrieved=false`:
-a suggested query is not a fetched announcement or an independent viewpoint.
+a suggested query is not a fetched announcement or an independent viewpoint. The
+separate [news evidence extension](news-evidence.md) now performs bounded
+source-screened retrieval through the shared news tools. Its actual results
+and retrieval status appear in tool output without mutating these identity-only
+planning fields.
 The configured Yahoo news fallback now also searches the current short/full/
 English names with the exact stock code. It accepts only articles carrying the
 exact canonical related ticker, applies the existing date window, deduplicates
