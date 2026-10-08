@@ -25,6 +25,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_MAX_TOOL_ROUNDS":      "max_tool_rounds",
+    "TRADINGAGENTS_STORAGE_BACKEND":      "storage_backend",
+    "TRADINGAGENTS_STORAGE_DB_PATH":      "storage_db_path",
+    "TRADINGAGENTS_STORAGE_MAX_ARTIFACT_BYTES": "storage_max_artifact_bytes",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
@@ -87,6 +90,10 @@ def build_default_config() -> dict:
     """
     return _apply_env_overrides({
         "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
+        # Optional archive; independent of checkpoints, market cache and memory.
+        "storage_backend": "filesystem",
+        "storage_db_path": None,  # defaults to results_dir/runs.sqlite3
+        "storage_max_artifact_bytes": 64 * 1024 * 1024,
         "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),
         "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH") or os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md"),
         # Optional cap on the number of resolved memory log entries. When set,

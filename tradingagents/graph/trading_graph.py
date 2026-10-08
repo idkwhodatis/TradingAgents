@@ -2,7 +2,7 @@ import hashlib
 import json
 import logging
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,8 @@ from tradingagents.llm_clients import create_tier_client, tier_provider
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
+from tradingagents.storage import create_run
+from tradingagents.storage.integration import persist_report
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
@@ -45,6 +47,7 @@ def _validate_trade_date(trade_date) -> str:
 # whether it checkpoints, and how often it retries a provider.
 _NOT_IN_SIGNATURE = frozenset({
     "results_dir", "data_cache_dir", "memory_log_path", "checkpoint_enabled", "llm_max_retries",
+    "storage_backend", "storage_db_path", "storage_max_artifact_bytes",
 })
 
 
@@ -182,12 +185,27 @@ class TradingAgentsGraph:
         """
         trade_date = _validate_trade_date(trade_date)
 
-        with run_config(self.config), \
-                self.checkpoint_scope(company_name, trade_date, asset_type, portfolio) as thread_id_value:
-            return self._run_graph(
-                company_name, trade_date, asset_type=asset_type,
-                checkpoint_thread_id=thread_id_value, portfolio=portfolio,
-            )
+        # Every invocation gets its own archive ID, even when the same graph is
+        # reused. This is separate from the stable resumable checkpoint identity.
+        self.run_store = create_run(self.config, company_name, trade_date)
+        self.last_run_id = self.run_store.run_id if self.run_store is not None else None
+        try:
+            with run_config(self.config), \
+                    self.checkpoint_scope(company_name, trade_date, asset_type, portfolio) as thread_id_value:
+                result = self._run_graph(
+                    company_name, trade_date, asset_type=asset_type,
+                    checkpoint_thread_id=thread_id_value, portfolio=portfolio,
+                )
+            if self.run_store is not None:
+                self.run_store.finish("completed")
+            return result
+        except BaseException as exc:
+            if self.run_store is not None:
+                with suppress(Exception):
+                    self.run_store.finish("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed")
+            raise
+        finally:
+            self.run_store = None
 
     def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock", portfolio=None) -> str | None:
         """Recompile the graph with a per-ticker checkpointer and return the
@@ -463,6 +481,20 @@ class TradingAgentsGraph:
             "final_rating": run_rating(final_state),
             "run_settings": self.run_settings(),
         }
+
+        store = getattr(self, "run_store", None)
+        own_store = store is None
+        if own_store:
+            store = create_run(self.config, final_state["company_of_interest"], trade_date)
+        if store is not None:
+            self.last_run_id = store.run_id
+            store.write_artifact("full_state.json", json.dumps(entry, ensure_ascii=False), "application/json")
+            persist_report(store, final_state, self.run_settings())
+            decision = run_rating(final_state)
+            store.update_metadata({"decision": decision, "needs_review": decision == "REVIEW"})
+            if own_store:
+                store.finish("completed")
+            return
 
         # A ticker that would escape the results directory is rejected.
         safe_ticker = safe_ticker_component(final_state["company_of_interest"])

@@ -36,6 +36,7 @@ from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.analyst_execution import build_analyst_execution_plan
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.storage import create_run
 
 # The native dashboard uses a shared buffer. Serialize in-process CLI runs and
 # protect rendering against concurrent deque updates. SDK work may use threads;
@@ -47,7 +48,7 @@ _RUN_LOCK = RLock()
 class AnalysisResult:
     final_state: dict
     decision: str
-    directory: Path
+    directory: Path | None
     report: Path | None = None
     progress: object | None = None
     graph: object | None = None
@@ -188,7 +189,7 @@ def _default_graph_factory(analysts, config, callbacks):
     return TradingAgentsGraph(analysts, config=config, debug=False, callbacks=callbacks)
 
 
-def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> AnalysisResult:
+def _execute_analysis(selections, config, portfolio, mode, graph_factory, run_store=None) -> AnalysisResult:
     selected_set = {getattr(analyst, "value", analyst) for analyst in selections["analysts"]}
     if not selected_set or selected_set.difference(ANALYST_ORDER):
         raise ValueError("Select at least one known analyst")
@@ -216,7 +217,7 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
     lock = RLock()
     with _RUN_LOCK, run_config(config):
         message_buffer.init_for_analysis(selected)
-        with persist_run_buffer(message_buffer, directory, lock):
+        with persist_run_buffer(message_buffer, directory, lock, run_store):
             # Journaling also works with --no-progress and --json, and starts
             # before SDK construction so a setup failure has a run log too.
             message_buffer.add_message("System", f"Selected ticker: {ticker}")
@@ -226,6 +227,8 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
             message_buffer.add_message("System", f"Selected analysts: {', '.join(selected)}")
             try:
                 graph = graph_factory(selected, config, [stats])
+                if run_store is not None:
+                    graph.run_store = run_store
                 layout = create_layout() if mode == "live" else None
 
                 def render():
@@ -280,13 +283,16 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory) -> Ana
                         message_buffer.add_message("System", f"Completed analysis for {trade_date}")
                         message_buffer.add_message("System", tracker.format_summary())
                 decision = run_rating(final_state)
-                return AnalysisResult(final_state, decision, directory,
+                if run_store is not None:
+                    run_store.update_metadata({"decision": decision, "needs_review": decision == "REVIEW"})
+                    run_store.finish("completed")
+                return AnalysisResult(final_state, decision, directory if run_store is None else None,
                                       progress=stats if mode == "plain" else None, graph=graph)
             except BaseException as exc:
                 # Preserve partial reports; log the failure type, not potentially
                 # credential-bearing provider exception text. CLI reports it.
                 phase = "Interrupted" if isinstance(exc, KeyboardInterrupt) else "Failed"
-                with suppress(OSError):
+                with suppress(Exception):
                     message_buffer.add_message("System", f"{phase} ({type(exc).__name__}); partial reports retained")
                 if mode == "plain":
                     stats.fail(exc)
@@ -297,7 +303,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
                  config=None, interactive=True, output_dir: Path | None = None,
                  progress_mode: str | None = None, show_report=False,
                  save_report=True, html: bool | None = None, clear_checkpoints=False,
-                 graph_factory=None) -> AnalysisResult:
+                 graph_factory=None, run_store=None) -> AnalysisResult:
     """Use the same native CLI workflow, optionally with pre-resolved inputs.
 
     Headless callers supply both selections and config. Only input collection
@@ -323,11 +329,22 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
 
         count = clear_all_checkpoints(config["data_cache_dir"])
         typer.echo(f"Cleared {count} checkpoint(s).", err=True)
-    result = _execute_analysis(selections, config, portfolio, mode, graph_factory or _default_graph_factory)
+    if run_store is None:
+        run_store = create_run(config, selections["ticker"], selections["analysis_date"])
+    try:
+        result = _execute_analysis(selections, config, portfolio, mode,
+                                   graph_factory or _default_graph_factory, run_store)
+    except BaseException as exc:
+        if run_store is not None:
+            with suppress(Exception):
+                run_store.finish("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed")
+        raise
 
     flags = flags or {}
     if interactive:
         console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
+        if run_store is not None:
+            console.print(f"Archive: {run_store.database_path} (run {run_store.run_id})")
         if is_review(result.decision):
             console.print("[yellow]No rating could be read. Review the saved decision text rather than treating it as a position.[/yellow]")
     result.report = _offer_reports(

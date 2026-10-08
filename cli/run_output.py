@@ -14,9 +14,9 @@ from tradingagents.dataflows.symbols import safe_ticker_component
 
 @dataclass(frozen=True)
 class RunOutput:
-    directory: Path
-    reports: Path
-    log: Path
+    directory: Path | None
+    reports: Path | None
+    log: Path | None
 
 
 def run_directory(config: dict, ticker: str, trade_date: str) -> Path:
@@ -38,17 +38,20 @@ def default_export_directory(config: dict, ticker: str) -> Path:
 
 
 @contextmanager
-def persist_run_buffer(buffer, directory: Path, lock: RLock):
+def persist_run_buffer(buffer, directory: Path, lock: RLock, run_store=None):
     """Persist buffer events immediately, independently of the display mode.
 
     Logs append and named sections overwrite, as in the original interactive
     CLI. Scope the wrappers: leaving them installed would write a later run's
     messages into every earlier ticker's log. Restore even on Ctrl+C/failure.
     """
-    directory.mkdir(parents=True, exist_ok=True)
-    output = RunOutput(directory, directory / "reports", directory / "message_tool.log")
-    output.reports.mkdir(exist_ok=True)
-    output.log.touch(exist_ok=True)
+    if run_store is None:
+        directory.mkdir(parents=True, exist_ok=True)
+        output = RunOutput(directory, directory / "reports", directory / "message_tool.log")
+        output.reports.mkdir(exist_ok=True)
+        output.log.touch(exist_ok=True)
+    else:
+        output = RunOutput(None, None, None)
     original_attributes = {
         name: (name in vars(buffer), vars(buffer).get(name))
         for name in ("add_message", "add_tool_call", "update_report_section")
@@ -60,8 +63,12 @@ def persist_run_buffer(buffer, directory: Path, lock: RLock):
 
     def append(line: str) -> None:
         # One line per native event, even for multi-line tool arguments.
-        with output.log.open("a", encoding="utf-8") as stream:
-            stream.write(line.replace("\r", " ").replace("\n", " ") + "\n")
+        line = line.replace("\r", " ").replace("\n", " ") + "\n"
+        if run_store is not None:
+            run_store.append_log(line)
+        else:
+            with output.log.open("a", encoding="utf-8") as stream:
+                stream.write(line)
 
     @wraps(add_message)
     def message(*args, **kwargs):
@@ -89,7 +96,10 @@ def persist_run_buffer(buffer, directory: Path, lock: RLock):
                 if current:
                     text = "\n".join(map(str, current)) if isinstance(current, list) else str(current)
                     if text != last_written.get(name):
-                        (output.reports / f"{name}.md").write_text(text, encoding="utf-8")
+                        if run_store is not None:
+                            run_store.write_artifact(f"reports/{name}.md", text, "text/markdown")
+                        else:
+                            (output.reports / f"{name}.md").write_text(text, encoding="utf-8")
                         last_written[name] = text
             return result
 

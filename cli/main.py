@@ -396,8 +396,12 @@ def analyze_headless(
             typer.echo("No rating could be parsed; review the saved report.", err=True)
         if result["report"]:
             typer.echo(f"Report: {result['report']}")
-        typer.echo(f"Run directory: {result['output_dir']}")
-        typer.echo(f"Message/tool log: {result['log_file']}")
+        if result.get("storage_backend") == "sqlite":
+            typer.echo(f"Archive: {result['storage_db']}")
+            typer.echo(f"Run ID: {result['run_id']}")
+        else:
+            typer.echo(f"Run directory: {result['output_dir']}")
+            typer.echo(f"Message/tool log: {result['log_file']}")
 
 
 if __name__ == "__main__":

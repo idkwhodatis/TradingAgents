@@ -446,3 +446,10 @@ Please reference our work if you find *TradingAgents* provides you with some hel
       url={https://arxiv.org/abs/2412.20138}, 
 }
 ```
+
+### Compressed run archives (optional)
+
+Set `TRADINGAGENTS_STORAGE_BACKEND=sqlite` to archive interactive and headless
+results/logs in a compressed SQLite database. Filesystem output remains the
+default; normal report exports remain available. See [run storage](docs/run-storage.md)
+for configuration, reading/re-export, explicit retention and backup precautions.

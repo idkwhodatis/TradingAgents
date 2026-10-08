@@ -23,6 +23,7 @@ from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
 from tradingagents.llm_clients.factory import tier_provider
 from tradingagents.llm_clients.headers import parse_llm_headers
 from tradingagents.portfolio import load_portfolio
+from tradingagents.storage import create_run
 
 
 class ResearchEffort(StrEnum):
@@ -230,7 +231,9 @@ def run_headless_analysis(
         raise ValueError("--output-dir must be a directory")
     run_settings = deepcopy(config)  # Never relocate results_dir under runs/.
     directory = run_directory(run_settings, ticker, trade_date).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
+    run_store = create_run(run_settings, ticker, trade_date)
+    if run_store is None:
+        directory.mkdir(parents=True, exist_ok=True)
     summary = {
         "symbol": ticker,
         "date": trade_date,
@@ -251,11 +254,18 @@ def run_headless_analysis(
         "report": None,
     }
 
+    if run_store is not None:
+        summary.update(output_dir=None, log_file=None, storage_backend="sqlite",
+                       storage_db=str(run_store.database_path), run_id=run_store.run_id)
+
     def save_summary():
         # An allowlist: no headers, credentials, holdings or exception text.
-        (directory / "run.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
+        text = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
+        if run_store is not None:
+            run_store.write_artifact("run.json", text, "application/json")
+            run_store.update_metadata(summary)
+        else:
+            (directory / "run.json").write_text(text, encoding="utf-8")
 
     save_summary()  # A failed rerun must not leave an older success summary.
     try:
@@ -265,7 +275,7 @@ def run_headless_analysis(
                         "analysts": [AnalystType(key) for key in selected], "asset_type": asset_type},
             interactive=False, output_dir=output_dir, progress_mode=progress_mode,
             show_report=show_report, save_report=save_report, html=html, clear_checkpoints=clear_checkpoints,
-            graph_factory=_create_graph,
+            graph_factory=_create_graph, run_store=run_store,
         )
         summary.update(status="completed", decision=result.decision,
                        needs_review=result.decision == "REVIEW", report=str(result.report) if result.report is not None else None)
@@ -273,10 +283,17 @@ def run_headless_analysis(
         if save_report and result.progress is not None:
             result.progress.complete()
     except BaseException as exc:
-        summary.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
-                       decision=None, needs_review=True, report=None)
-        # Do not replace the original error with a secondary disk failure.
-        with suppress(OSError):
+        # Do not replace the original error with a secondary storage failure,
+        # including failures reading the already-completed analytical status.
+        with suppress(Exception):
+            if run_store is not None and run_store.status == "completed":
+                # Export happens after analysis/checkpoint completion.
+                metadata = run_store.get_metadata()
+                summary.update(status="completed", export_status="failed", report=None,
+                               decision=metadata.get("decision"), needs_review=metadata.get("needs_review", True))
+            else:
+                summary.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                               decision=None, needs_review=True, report=None)
             save_summary()
         raise
     return summary
