@@ -164,12 +164,12 @@ def register_analyze_command(
             ),
         ] = None,
         save_report: Annotated[
-            bool,
+            bool | None,
             typer.Option(
                 "--save-report/--no-save-report",
-                help="Export the complete Markdown report (default: on). Native section files and logs are always written.",
+                help="Export complete reports. Omit to honor TRADINGAGENTS_SAVE_REPORT (default: on). Logs and incremental reports remain in the configured storage backend.",
             ),
-        ] = True,
+        ] = None,
         show_report: Annotated[
             bool,
             typer.Option(
@@ -186,7 +186,7 @@ def register_analyze_command(
             ),
         ] = False,
     ):
-        """Analyze SYMBOL without prompts and save reports automatically.
+        """Analyze SYMBOL without prompts using the configured report-export policy.
 
         Defaults: today, all applicable analysts, medium research depth. Uses the
         existing provider/model/key environment settings. Put options after analyze.
@@ -216,6 +216,7 @@ def register_analyze_command(
                     max_tokens=max_tokens,
                     llm_max_retries=max_retries,
                     checkpoint_enabled=checkpoint,
+                    save_report=save_report,
                     results_dir=str(results_dir) if results_dir is not None else None,
                 )
                 result = run_headless_analysis(
@@ -228,7 +229,6 @@ def register_analyze_command(
                     output_dir=output_dir,
                     progress_mode=progress_mode,
                     show_report=show_report,
-                    save_report=save_report,
                     html=html,
                     clear_checkpoints=clear_checkpoints,
                 )

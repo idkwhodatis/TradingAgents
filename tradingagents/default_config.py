@@ -1,4 +1,6 @@
+import math
 import os
+import re
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -25,6 +27,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_MAX_TOOL_ROUNDS":      "max_tool_rounds",
+    "TRADINGAGENTS_SAVE_REPORT":          "save_report",
     "TRADINGAGENTS_STORAGE_BACKEND":      "storage_backend",
     "TRADINGAGENTS_STORAGE_DB_PATH":      "storage_db_path",
     "TRADINGAGENTS_STORAGE_MAX_ARTIFACT_BYTES": "storage_max_artifact_bytes",
@@ -32,6 +35,14 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_ASHARE_IDENTITY_TIMEOUT": "ashare_identity_timeout",
     "TRADINGAGENTS_ASHARE_IDENTITY_CACHE_TTL": "ashare_identity_cache_ttl",
     "TRADINGAGENTS_DUCKDUCKGO_NEWS_ENABLED": "duckduckgo_news_enabled",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_MAX_QUERIES": "duckduckgo_news_max_queries",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_TIMEOUT": "duckduckgo_news_timeout",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_TOTAL_TIMEOUT": "duckduckgo_news_total_timeout",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_CACHE_TTL": "duckduckgo_news_cache_ttl",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_REGION": "duckduckgo_news_region",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_ALLOWED_DOMAINS": "duckduckgo_news_allowed_domains",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_MAX_RESULTS": "duckduckgo_news_max_results",
+    "TRADINGAGENTS_DUCKDUCKGO_NEWS_MIN_INTERVAL": "duckduckgo_news_min_interval",
     "TRADINGAGENTS_ASHARE_ANNOUNCEMENTS_ENABLED": "ashare_announcements_enabled",
     "TRADINGAGENTS_COMPANY_WEBSITE_ENABLED": "company_website_enabled",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
@@ -71,7 +82,10 @@ def _coerce(value: str, reference):
     if isinstance(reference, int) and not isinstance(reference, bool):
         return int(value)
     if isinstance(reference, float):
-        return float(value)
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("expected a finite number")
+        return number
     return value
 
 
@@ -82,7 +96,14 @@ def _apply_env_overrides(config: dict) -> dict:
         if raw is None or raw == "":
             continue
         try:
-            config[key] = _coerce(raw, config.get(key))
+            if key == "duckduckgo_news_allowed_domains":
+                domains = [part.strip().lower() for part in raw.split(",")]
+                hostname = r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}"
+                if len(domains) > 40 or any(not re.fullmatch(hostname, d) for d in domains):
+                    raise ValueError("expected at most 40 comma-separated plain ASCII hostnames")
+                config[key] = list(dict.fromkeys(domains))
+            else:
+                config[key] = _coerce(raw, config.get(key))
         except ValueError as exc:
             raise ValueError(f"Invalid value for {env_var}: {exc}") from exc
     return config
@@ -98,6 +119,8 @@ def build_default_config() -> dict:
         "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR") or os.path.join(_TRADINGAGENTS_HOME, "logs"),
         # Optional archive; independent of checkpoints, market cache and memory.
         "storage_backend": "filesystem",
+        # Complete CLI Markdown/HTML export; does not disable run journaling.
+        "save_report": True,
         "storage_db_path": None,  # defaults to results_dir/runs.sqlite3
         "storage_max_artifact_bytes": 64 * 1024 * 1024,
         "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR") or os.path.join(_TRADINGAGENTS_HOME, "cache"),
@@ -183,8 +206,9 @@ def build_default_config() -> dict:
         "duckduckgo_news_enabled": True,
         "ashare_announcements_enabled": True,
         "duckduckgo_news_timeout": 15.0,
+        "duckduckgo_news_min_interval": 3.0,
         "duckduckgo_news_total_timeout": 45.0,
-        "duckduckgo_news_max_queries": 4,
+        "duckduckgo_news_max_queries": 2,
         "duckduckgo_news_max_results": 10,
         "duckduckgo_news_cache_ttl": 300,
         "duckduckgo_news_region": "auto",

@@ -123,9 +123,10 @@ Defaults in `DEFAULT_CONFIG`:
 {
     "duckduckgo_news_enabled": True,
     "ashare_announcements_enabled": True,
+    "duckduckgo_news_min_interval": 3.0, # seconds between DDG request starts; 0..30
     "duckduckgo_news_timeout": 15.0,      # seconds per bounded request
     "duckduckgo_news_total_timeout": 45,  # shared official + news search budget
-    "duckduckgo_news_max_queries": 4,    # shared per call; 1..8
+    "duckduckgo_news_max_queries": 2,    # shared per call; 1..8
     "duckduckgo_news_max_results": 10,   # 1..30 per retrieval category
     "duckduckgo_news_cache_ttl": 300,    # seconds; 0 disables cache
     "duckduckgo_news_region": "auto",   # Chinese query cn-zh; otherwise us-en
@@ -145,7 +146,33 @@ Budget exhaustion is distinguished from provider blocking and empty results.
 
 Set `TRADINGAGENTS_DUCKDUCKGO_NEWS_ENABLED=false` and
 `TRADINGAGENTS_ASHARE_ANNOUNCEMENTS_ENABLED=false` to restore the primary-only
-path in both CLI modes. Other settings can be supplied through Python config.
+path in both CLI modes. All the search settings above also support environment
+overrides: `TRADINGAGENTS_DUCKDUCKGO_NEWS_MAX_QUERIES`, `_MAX_RESULTS`, `_TIMEOUT`,
+`_TOTAL_TIMEOUT`, `_MIN_INTERVAL`, `_CACHE_TTL`, `_REGION`, and `_ALLOWED_DOMAINS`
+(each shorthand uses the same `TRADINGAGENTS_DUCKDUCKGO_NEWS` prefix).
+Allowed domains use a comma-separated list of plain ASCII hostnames, for example
+`reuters.com,apnews.com`, without schemes, paths, wildcards or empty entries.
+An empty environment value keeps the built-in default. Invalid numeric types or
+malformed lists fail loudly; bounded search validation still applies.
+
+The query cap is shared with optional A-share announcement discovery. When both
+fallback news and verified A-share announcement discovery run, the default cap of
+2 reserves one query for Chinese news and one for announcements. Set
+`TRADINGAGENTS_DUCKDUCKGO_NEWS_MAX_QUERIES=3` for Chinese + English news plus the
+announcement query, or disable announcements to use both of the default two
+queries for news. A cap of 1 prioritizes news and skips optional announcements.
+These are bounded search attempts, not guaranteed evidence coverage.
+
+Pacing is process-shared across news and announcement calls, including repeated
+agent tool calls. It spaces **every HTTP request start**, including the token
+lookup and the subsequent news request for one query. A query therefore may use
+two requests; `MAX_QUERIES` counts queries, not HTTP requests. Waiting consumes
+the shared search budget, and no wait is added after the last request. When the
+next permitted start cannot fit within the budget, the search stops. Provider
+blocks/challenges stop the remaining work without automatic retries; an active
+cooldown also stops without waiting. Lower query counts and pacing reduce request
+bursts but cannot guarantee that DuckDuckGo will admit requests. No live-service
+success should be inferred from deterministic offline tests.
 No primary price/fundamental vendor, signal logic or trade execution is changed.
 
 Run deterministic checks with `pytest -q`; ordinary tests prohibit network.

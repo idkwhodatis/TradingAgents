@@ -296,13 +296,17 @@ def test_interactive_config_does_not_erase_environment_reasoning(setup, monkeypa
     assert native._build_run_config(selections, None)["openai_reasoning_effort"] == "medium"
 
 
-def test_no_complete_export_still_writes_native_sections(setup):
-    base, _, runner = setup
-    out = runner.invoke(main.app, ["analyze", "NVDA", "--json", "--no-save-report"])
+@pytest.mark.parametrize("flags", [[], ["--no-save-report"]])
+def test_no_complete_export_still_writes_native_sections(setup, flags):
+    base, graphs, runner = setup
+    base["save_report"] = False
+    out = runner.invoke(main.app, ["analyze", "NVDA", "--json", *flags])
     assert out.exit_code == 0, out.output
     summary = json.loads(out.stdout)
     assert summary["status"] == "completed" and summary["report"] is None
+    assert graphs[0].config["save_report"] is False
     assert (Path(summary["output_dir"]) / "reports" / "market_report.md").exists()
+    assert "Completed analysis" in Path(summary["log_file"]).read_text()
     assert not (Path(base["results_dir"]) / "reports").exists()
 
 

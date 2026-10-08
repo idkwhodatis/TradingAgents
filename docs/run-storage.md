@@ -7,7 +7,8 @@ Filesystem output remains the default. Opt in for **both the interactive TUI and
 export TRADINGAGENTS_STORAGE_BACKEND=sqlite
 # Optional: otherwise the archive is <results_dir>/runs.sqlite3
 export TRADINGAGENTS_STORAGE_DB_PATH=/absolute/path/to/runs.sqlite3
-tradingagents analyze NVDA --no-save-report --json
+export TRADINGAGENTS_SAVE_REPORT=false
+tradingagents analyze NVDA --json
 ```
 
 Programmatic configuration uses `storage_backend="sqlite"`, `storage_db_path`
@@ -47,9 +48,19 @@ written. Headless summaries instead provide `storage_backend`, `storage_db` and
 null. The TUI prints the archive path and run ID after completion.
 
 `--no-save-report` still skips the **complete export only**, not journaling.
-Existing `--save-report` behavior (including headless default) and `--output-dir`
-continue to use the existing Markdown/HTML renderer and ordinary real files.
-The interactive Save report prompt is unchanged. Exports are user-owned copies;
+The built-in `save_report=True` remains backward compatible. Set
+`TRADINGAGENTS_SAVE_REPORT=false` to skip complete exports by default, then use
+`--save-report` to export a particular analysis. Explicit `--save-report` /
+`--no-save-report` flags override the environment/default config. The interactive
+Save report prompt uses that config as its default and still accepts a choice.
+`--output-dir` requires exports enabled (add `--save-report` if your default is
+false). Exports use the existing Markdown/HTML renderer and ordinary real files.
+
+Setting `SAVE_REPORT=false` alone does **not** select SQLite: the filesystem
+backend still journals native logs and partial reports. Use both settings above
+to archive those artifacts in SQLite without an export directory. Neither setting
+disables checkpoints, and changing the export preference does not invalidate them.
+Exports are user-owned copies;
 archive retention never deletes them. Re-export renders with the current renderer
 and a fresh generated timestamp, rather than promising byte-identical HTML.
 

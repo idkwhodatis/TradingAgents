@@ -20,7 +20,7 @@ import re
 import time
 import unicodedata
 from collections import OrderedDict
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from datetime import UTC, date, datetime, time as datetime_time, timedelta
 from email.utils import parsedate_to_datetime
@@ -119,6 +119,8 @@ _VERSION = 3
 _BLOCK_UNTIL = 0.0
 _BLOCK_REASON = ""
 _BLOCK_SECONDS = 60.0
+_REQUEST_LOCK = RLock()
+_LAST_REQUEST_STARTED = None
 _MAX_RESPONSE_BYTES = 1_048_576
 _MAX_ROWS_PER_QUERY = 100
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -159,6 +161,7 @@ class _SearchFailure(Exception):
         super().__init__(reason)
         self.reason = reason
         self.stop = stop
+        self.block_recorded = False
 
 
 def block_status() -> dict | None:
@@ -232,7 +235,8 @@ def _settings(config):
     settings = {
         "timeout": _number(config, "duckduckgo_news_timeout", 15, 0.5, 15),
         "total_timeout": _number(config, "duckduckgo_news_total_timeout", 45, 5, 120),
-        "max_queries": _number(config, "duckduckgo_news_max_queries", 4, 1, 8, integer=True),
+        "min_interval": _number(config, "duckduckgo_news_min_interval", 3, 0, 30),
+        "max_queries": _number(config, "duckduckgo_news_max_queries", 2, 1, 8, integer=True),
         "max_results": _number(config, "duckduckgo_news_max_results", 10, 1, 30, integer=True),
         "cache_ttl": _number(config, "duckduckgo_news_cache_ttl", 300, 0, 3600),
     }
@@ -416,7 +420,60 @@ def _remaining_budget(session, *, reserve=0.0):
     return remaining
 
 
+def _check_provider_ready(session):
+    """Never spend pacing time or start another request during a known block."""
+    blocked = block_status()
+    if blocked:
+        failure = _SearchFailure(blocked["reason"], stop=True)
+        failure.block_recorded = True
+        raise failure
+    return _remaining_budget(session)
+
+
+@contextmanager
+def _request_slot(session):
+    """Serialize and pace DDG HTTP requests across tool calls in this process.
+
+    Token, news, and official-discovery requests each take a slot. Keep the
+    gate until the response is checked so a challenge is recorded before the
+    next caller can send. Lock contention and pacing both use the caller's
+    existing deadline; neither creates a fresh budget or a retry loop.
+    """
+    remaining = _check_provider_ready(session)
+    acquired = _REQUEST_LOCK.acquire(timeout=remaining) if remaining is not None else _REQUEST_LOCK.acquire()
+    if not acquired:
+        raise _SearchFailure("budget_exhausted", stop=True)
+    try:
+        remaining = _check_provider_ready(session)
+        interval = getattr(session, "_duckduckgo_news_min_interval", 3.0)
+        delay = (
+            max(0.0, _LAST_REQUEST_STARTED + interval - time.monotonic())
+            if _LAST_REQUEST_STARTED is not None else 0.0
+        )
+        if delay:
+            # Do not sleep to (or beyond) the deadline when no request can fit.
+            if remaining is not None and delay >= remaining:
+                raise _SearchFailure("budget_exhausted", stop=True)
+            time.sleep(delay)
+        _check_provider_ready(session)
+        try:
+            yield
+        except _SearchFailure as exc:
+            if exc.stop and exc.reason != "budget_exhausted" and not exc.block_recorded:
+                record_block(exc.reason)
+                exc.block_recorded = True
+            raise
+    finally:
+        _REQUEST_LOCK.release()
+
+
 def _read_response(session, url, params, timeout):
+    with _request_slot(session):
+        return _read_response_unpaced(session, url, params, timeout)
+
+
+def _read_response_unpaced(session, url, params, timeout):
+    global _LAST_REQUEST_STARTED
     # Only fixed DuckDuckGo endpoints are ever fetched. Redirects and retries are
     # deliberately disabled, including when an anti-bot response offers a route.
     remaining = _remaining_budget(session)
@@ -439,6 +496,7 @@ def _read_response(session, url, params, timeout):
     transport.append(observation)
     response = None
     try:
+        _LAST_REQUEST_STARTED = time.monotonic()
         response = session.get(
             url,
             params=params,
@@ -546,7 +604,8 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
 
     Configuration uses ``duckduckgo_news_`` keys: timeout (seconds/request, 15),
     total_timeout (shared seconds across requests, 45),
-    max_queries (4), max_results (10 total), cache_ttl (300 seconds), region
+    min_interval (seconds between HTTP request starts, 3; process-shared),
+    max_queries (2), max_results (10 total), cache_ttl (300 seconds), region
     ("auto" selects cn-zh/us-en by query), allowed_domains (additional trusted
     publisher/issuer hostnames), and aliases (optional strong company names).
     Numeric bounds are validated rather than silently accepting unsafe limits.
@@ -612,7 +671,9 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
     website_key = company_website_cache_key(company_website, company_ticker, now=now)
     if website_key is None:
         company_website = None
-    cache_settings = tuple((k, v) for k, v in settings.items() if k != "total_timeout")
+    cache_settings = tuple(
+        (k, v) for k, v in settings.items() if k not in {"total_timeout", "min_interval"}
+    )
     key = (_VERSION, tuple(normalized), start.isoformat(), end.isoformat(), cache_settings, website_key)
     ttl = settings["cache_ttl"]
     with _CACHE_LOCK:
@@ -632,7 +693,8 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
         )
         return result
     diagnostics["limits"] = {
-        k: settings[k] for k in ("max_queries", "max_results", "timeout", "total_timeout")
+        k: settings[k]
+        for k in ("max_queries", "max_results", "timeout", "total_timeout", "min_interval")
     }
     diagnostics["retrieved_at"] = now.isoformat()
     by_url = {}
@@ -640,6 +702,7 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
     successes = failures = 0
     with requests.Session() as session:
         session._duckduckgo_news_deadline = deadline
+        session._duckduckgo_news_min_interval = settings["min_interval"]
         session._duckduckgo_news_transport = diagnostics["transport"]
         # requests' default adapter has zero retries. Never add a retry adapter.
         session.headers.update({"User-Agent": "TradingAgents-NewsEvidence/1.0"})
@@ -657,7 +720,7 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
                 failures += 1
                 outcome.update(status="unavailable", reason=exc.reason)
                 if exc.stop:
-                    if exc.reason != "budget_exhausted":
+                    if exc.reason != "budget_exhausted" and not exc.block_recorded:
                         record_block(exc.reason)
                     diagnostics["stop_reason"] = exc.reason
                     diagnostics["stop_search"] = True

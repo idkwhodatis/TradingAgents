@@ -62,6 +62,13 @@ def test_checkpoint_none_preserves_env_default():
     assert cfg["checkpoint_enabled"] is True  # not clobbered back to False
 
 
+@pytest.mark.parametrize("save_report", [False, True])
+def test_interactive_config_preserves_export_default(save_report):
+    with mock.patch.object(cli_run, "DEFAULT_CONFIG", dict(cli_run.DEFAULT_CONFIG, save_report=save_report)):
+        config = cli_run._build_run_config(SELECTIONS, checkpoint=None)
+    assert config["save_report"] is save_report
+
+
 @pytest.mark.parametrize("flag", [True, False])
 def test_checkpoint_flag_overrides_env(flag):
     patched = dict(cli_run.DEFAULT_CONFIG, checkpoint_enabled=not flag)

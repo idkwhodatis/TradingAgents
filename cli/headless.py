@@ -16,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from cli.models import AnalystType
-from cli.run_output import run_directory
+from cli.run_output import resolve_report_config, run_directory
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.extensions.ashare_identity import identity_for, prepare_instrument
@@ -70,7 +70,7 @@ def build_headless_config(
     provider requires both model flags, and drops the previous endpoint/headers
     so credentials or provider-specific settings are not sent to the wrong host.
     """
-    config = deepcopy(base)
+    config = resolve_report_config(deepcopy(base))
     provider = overrides.get("llm_provider")
     if provider is not None:
         provider = provider.strip().lower()
@@ -211,7 +211,7 @@ def run_headless_analysis(
     output_dir: Path | None = None,
     progress_mode: str = "off",
     show_report: bool = False,
-    save_report: bool = True,
+    save_report: bool | None = None,
     html: bool = True,
     clear_checkpoints: bool = False,
 ) -> dict:
@@ -219,9 +219,12 @@ def run_headless_analysis(
 
     `output_dir` is the complete-report export path (the interactive Save path),
     not a replacement results root. Logs always use results_dir/ticker/date.
+    Explicit export choices override the resolved configuration.
     """
     from cli.run import run_analysis
 
+    config = resolve_report_config(config, save_report)
+    save_report = config["save_report"]
     ticker, trade_date, selected, asset_type = resolve_analysis_inputs(
         symbol, analysis_date, analysts, asset_type
     )
@@ -280,7 +283,7 @@ def run_headless_analysis(
             selections={"ticker": ticker, "analysis_date": trade_date,
                         "analysts": [AnalystType(key) for key in selected], "asset_type": asset_type},
             interactive=False, output_dir=output_dir, progress_mode=progress_mode,
-            show_report=show_report, save_report=save_report, html=html, clear_checkpoints=clear_checkpoints,
+            show_report=show_report, html=html, clear_checkpoints=clear_checkpoints,
             graph_factory=_create_graph, run_store=run_store,
         )
         summary.update(status="completed", decision=result.decision,

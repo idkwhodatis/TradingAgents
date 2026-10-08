@@ -26,7 +26,7 @@ Missing credentials fail instead of prompting.
 - **Provider/models/language/headers:** existing `.env` / `DEFAULT_CONFIG`.
   OpenCode Go and custom headers continue to work without extra setup.
 - **Saving:** native incremental logs/sections are always saved. A complete
-  report is automatically exported as well, unless `--no-save-report` is given.
+  report is automatically exported as well, unless `TRADINGAGENTS_SAVE_REPORT=false` or `--no-save-report` is given.
 - **Display:** the native live dashboard appears in a normal terminal; no
   questions are asked. The optional final full-report print is off by default.
 
@@ -74,8 +74,8 @@ There are **two native report locations**, serving different purposes:
    Only selected/generated sections are written.
 2. `<results_dir>/reports/<symbol>_<timestamp>` is the interactive **Save report?**
    default export location: the consolidated Markdown and HTML reports and team subfolders.
-   Headless mode defaults to the equivalent of answering Yes and accepting that
-   path. `--output-dir` selects an explicit export path; `--no-save-report` skips
+   Headless mode uses the configured export preference (built-in default: Yes)
+   and accepts that path when exporting. `--output-dir` selects an explicit export path; `--no-save-report` skips
    this extra export, not the native incremental files/log.
 
 `message_tool.log` uses the native timestamped `[System]`, `[User]`, `[Agent]`,
@@ -115,7 +115,7 @@ The interactive post-run questions have explicit headless equivalents:
 
 | Interactive choice | Headless equivalent |
 | --- | --- |
-| Save report? Yes (default) | `--save-report` (default) |
+| Save report? Yes (config default: true) | `--save-report` |
 | Save report? No | `--no-save-report` |
 | Save path | `--output-dir DIR` (complete export only) |
 | Display full report? Yes | `--show-report` |
@@ -166,7 +166,14 @@ reference. Root analysis flags before this subcommand are rejected, not ignored.
 Changing providers still drops inherited endpoint/headers to avoid forwarding
 provider-specific credentials to another service. Set the new endpoint/headers
 explicitly as needed. Changing only a model within one provider preserves them.
-`--output-dir` cannot be combined with `--no-save-report`.
+Explicit `--save-report` / `--no-save-report` overrides the shared
+`save_report` config (`TRADINGAGENTS_SAVE_REPORT`, built-in default `true`).
+The interactive Save report prompt uses the same configured default.
+`--output-dir` requires saving enabled; add `--save-report` to override an
+environment default of `false`. `--output-dir` cannot be combined with
+`--no-save-report`. Logs, partial reports, run storage and checkpoints still work
+when complete exports are disabled. Select `TRADINGAGENTS_STORAGE_BACKEND=sqlite`
+separately if you want run artifacts archived in SQLite.
 
 ## Execution parity and automation
 

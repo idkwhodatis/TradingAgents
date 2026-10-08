@@ -212,7 +212,8 @@ class TestCheckpointSignature(unittest.TestCase):
             self.assertNotEqual(base, g._run_signature("stock"), key)
         # Where a run keeps its files, and how it retries, do not change what it writes.
         for key, value in (("results_dir", "/elsewhere"), ("data_cache_dir", "/cache"),
-                           ("memory_log_path", "/log.md"), ("checkpoint_enabled", True), ("llm_max_retries", 9)):
+                           ("memory_log_path", "/log.md"), ("checkpoint_enabled", True), ("llm_max_retries", 9),
+                           ("save_report", True), ("save_report", False)):
             g.config = {**base_config, key: value}
             self.assertEqual(base, g._run_signature("stock"), key)
         g.config = dict(base_config)

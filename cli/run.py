@@ -28,7 +28,7 @@ from cli.display import (
     update_display,
     update_research_team_status,
 )
-from cli.run_output import persist_run_buffer, run_directory
+from cli.run_output import persist_run_buffer, resolve_report_config, run_directory
 from cli.selections import depth_from_env, get_user_selections, unattended_gaps
 from cli.stats_handler import StatsCallbackHandler
 from tradingagents.agents.rating import is_review, run_rating
@@ -290,13 +290,13 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory, run_st
 def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, selections=None,
                  config=None, interactive=True, output_dir: Path | None = None,
                  progress_mode: str | None = None, show_report=False,
-                 save_report=True, html: bool | None = None, clear_checkpoints=False,
+                 save_report: bool | None = None, html: bool | None = None, clear_checkpoints=False,
                  graph_factory=None, run_store=None) -> AnalysisResult:
     """Use the same native CLI workflow, optionally with pre-resolved inputs.
 
     Headless callers supply both selections and config. Only input collection
-    and post-run questions differ: headless exports automatically, optionally
-    prints the complete report, and never reads/persists interactive preferences.
+    and post-run questions differ: headless uses the configured export policy,
+    optionally prints the report, and never reads/persists interactive preferences.
     """
     if selections is None:
         if not interactive:
@@ -311,6 +311,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
         selections = get_user_selections(flags) if flags is not None else get_user_selections()
     if config is None:
         config = _build_run_config(selections, checkpoint)
+    flags = flags or {}
+    config = resolve_report_config(config, flags.get("save") if interactive else save_report)
     ticker, config = prepare_instrument(selections["ticker"], selections["asset_type"], config)
     selections = {**selections, "ticker": ticker}
     mode = progress_mode if progress_mode is not None else ("live" if interactive else "off")
@@ -330,7 +332,6 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
                 run_store.finish("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed")
         raise
 
-    flags = flags or {}
     if interactive:
         console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
         if run_store is not None:
@@ -339,11 +340,11 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
             console.print("[yellow]No rating could be read. Review the saved decision text rather than treating it as a position.[/yellow]")
     result.report = _offer_reports(
         result.final_state, result.graph, selections["ticker"],
-        save=flags.get("save") if interactive else save_report,
+        save=flags.get("save") if interactive else config["save_report"],
         show=flags.get("show") if interactive else show_report,
         html=flags.get("html", html) if interactive else html,
         output_dir=output_dir, progress=result.progress, strict=not interactive,
-        announce=interactive,
+        announce=interactive, save_default=config["save_report"],
     )
     return result
 
@@ -383,17 +384,20 @@ def _open_page(page: Path) -> None:
 
 
 def _offer_reports(final_state, graph, ticker, save=None, show=None, html=None, *,
-                   output_dir=None, progress=None, strict=False, announce=True):
+                   output_dir=None, progress=None, strict=False, announce=True, save_default=True):
     """Save the report tree and show it; ``save``/``show``/``html`` answer the questions when given.
 
     A saved report includes the HTML page unless ``html`` is False. Someone
     answering the save question at the prompt is also asked about the page and
     offered to open it; a run whose flags answer the save question asks neither.
+    ``save_default`` comes from the same resolved config used for execution.
     """
     report_file = None
     asked = save is None
     if asked:
-        save = typer.prompt("Save report?", default="Y").strip().upper() in ("Y", "YES", "")
+        default = "Y" if save_default else "N"
+        answer = typer.prompt("Save report?", default=default).strip().upper() or default
+        save = answer in ("Y", "YES")
     if save:
         # Under results_dir, not the working directory: in Docker the working
         # directory is inside the container and the report goes with it, while

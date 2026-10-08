@@ -14,7 +14,7 @@ import cli.main as main
 import cli.run as native
 from cli.models import AnalystType
 from tests.native_cli_helpers import RecordingGraph
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import DEFAULT_CONFIG, build_default_config
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.storage import SQLiteStorage, create_run
 
@@ -194,6 +194,106 @@ def test_no_save_report_keeps_reports_in_database_only(sqlite_setup):
     assert not list(Path(config["results_dir"]).rglob("*.md"))
 
 
+@pytest.mark.parametrize("env_value,flags,expected", [
+    ("false", [], False),
+    ("false", ["--save-report"], True),
+    ("true", ["--no-save-report"], False),
+    ("true", [], True),
+])
+def test_export_env_and_explicit_flags_reach_shared_config(
+    sqlite_setup, monkeypatch, env_value, flags, expected
+):
+    config, graphs, runner = sqlite_setup
+    monkeypatch.setenv("TRADINGAGENTS_SAVE_REPORT", env_value)
+    config["save_report"] = build_default_config()["save_report"]
+    original = deepcopy(config)
+    outcome = runner.invoke(main.app, ["analyze", "NVDA", *flags, "--json"])
+    assert outcome.exit_code == 0, outcome.output
+    summary = json.loads(outcome.stdout)
+    assert graphs[0].config["save_report"] is expected
+    assert config == original  # An explicit flag must not change later runs.
+    assert bool(summary["report"]) is expected
+    assert (Path(config["results_dir"]) / "reports").exists() is expected
+    assert summary["status"] == "completed"
+    database = _database(config)
+    run_id = summary["run_id"]
+    assert database.get_run(run_id)["status"] == "completed"
+    assert "Completed analysis" in _log(database, run_id)
+    assert database.read_artifact(run_id, "reports/market_report.md")
+    assert _json_artifact(database, run_id, "report_state.json")["final_trade_decision"] == "Hold"
+    assert _json_artifact(database, run_id, "full_state.json")["market_report"]
+    _assert_no_native_directories(config)
+
+
+def test_output_directory_requires_export_even_when_disabled_by_config(sqlite_setup, tmp_path):
+    config, graphs, runner = sqlite_setup
+    config["save_report"] = False
+    export = tmp_path / "export"
+    outcome = runner.invoke(main.app, ["analyze", "NVDA", "--output-dir", str(export), "--json"])
+    assert outcome.exit_code == 1
+    assert "--output-dir requires --save-report" in outcome.output
+    assert not export.exists()
+    assert not _database_path(config).exists()
+    assert not graphs
+    outcome = runner.invoke(
+        main.app, ["analyze", "NVDA", "--output-dir", str(export), "--save-report", "--json"]
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert Path(json.loads(outcome.stdout)["report"]) == export / "complete_report.md"
+    assert graphs[0].config["save_report"] is True
+    assert config["save_report"] is False
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_direct_headless_override_and_default_use_shared_config(sqlite_setup, configured):
+    config, graphs, _ = sqlite_setup
+    config["save_report"] = configured
+    default = headless.run_headless_analysis("NVDA", config=config)
+    override = headless.run_headless_analysis("NVDA", config=config, save_report=not configured)
+    assert bool(default["report"]) is configured
+    assert bool(override["report"]) is not configured
+    assert [graph.config["save_report"] for graph in graphs] == [configured, not configured]
+    assert config["save_report"] is configured
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_tui_save_prompt_uses_resolved_config_default(sqlite_setup, monkeypatch, configured):
+    config, graphs, _ = sqlite_setup
+    monkeypatch.setenv("TRADINGAGENTS_SAVE_REPORT", str(configured).lower())
+    config["save_report"] = build_default_config()["save_report"]
+    prompts = []
+
+    def prompt(question, default=None, **kwargs):
+        prompts.append((question, default))
+        return default
+
+    monkeypatch.setattr(native.typer, "prompt", prompt)
+    result = native.run_analysis(
+        config=config, selections=_selections(), flags={"show": False, "html": False},
+        progress_mode="off",
+    )
+    assert prompts[0] == ("Save report?", "Y" if configured else "N")
+    assert bool(result.report) is configured
+    assert graphs[0].config["save_report"] is configured
+    assert (Path(config["results_dir"]) / "reports").exists() is configured
+    assert _database(config).get_run(result.graph.run_store.run_id)["status"] == "completed"
+    _assert_no_native_directories(config)
+
+
+@pytest.mark.parametrize("save", [False, True])
+def test_tui_save_flag_overrides_config_without_prompt(sqlite_setup, monkeypatch, save):
+    config, graphs, _ = sqlite_setup
+    config["save_report"] = not save
+    monkeypatch.setattr(native.typer, "prompt", lambda *a, **k: pytest.fail("flagged run prompted"))
+    result = native.run_analysis(
+        config=config, selections=_selections(), flags={"save": save, "show": False},
+        progress_mode="off",
+    )
+    assert bool(result.report) is save
+    assert graphs[0].config["save_report"] is save
+    assert config["save_report"] is not save
+
+
 def test_explicit_export_directory_does_not_relocate_database(sqlite_setup, tmp_path):
     config, graphs, runner = sqlite_setup
     export = tmp_path / "export 中文"
@@ -314,6 +414,7 @@ def test_partial_failure_and_ctrl_c_persist_before_raising(
 ):
     config, graphs, _ = sqlite_setup
     config["checkpoint_enabled"] = True
+    config["save_report"] = False
     original_factory = headless._create_graph
     failure = (
         KeyboardInterrupt() if interrupted else RuntimeError("synthetic-private-provider-error")
@@ -371,6 +472,7 @@ def test_partial_failure_and_ctrl_c_persist_before_raising(
         assert summary["log_file"] is None
         assert "synthetic-private-provider-error" not in json.dumps(summary)
     _assert_no_native_directories(config)
+    assert not (Path(config["results_dir"]) / "reports").exists()
 
 
 def test_graph_constructor_failure_leaves_sanitized_failed_run(sqlite_setup, monkeypatch):

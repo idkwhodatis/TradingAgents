@@ -139,7 +139,7 @@ def retrieve_news(primary, ticker: str | None, start_date: str, end_date: str, *
             and official_identity.get("confidence") == "verified"):
         official_identity = None
     needs_news = enabled and available is False
-    query_budget = _number(config, "duckduckgo_news_max_queries", 4, 1, 8, integer=True)
+    query_budget = _number(config, "duckduckgo_news_max_queries", 2, 1, 8, integer=True)
     # News is the requested core result. Reserve at most one remaining query
     # for optional disclosure discovery; it must not prevent news from running.
     news_budget = max(1, query_budget - bool(official_identity)) if needs_news else 0

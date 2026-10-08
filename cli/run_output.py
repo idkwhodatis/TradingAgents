@@ -19,6 +19,13 @@ class RunOutput:
     log: Path | None
 
 
+def resolve_report_config(config: dict, save_report: bool | None = None) -> dict:
+    """Keep export policy in the shared config, without changing caller defaults."""
+    return {**config, "save_report": (
+        config.get("save_report", True) if save_report is None else save_report
+    )}
+
+
 def run_directory(config: dict, ticker: str, trade_date: str) -> Path:
     """Use the interactive CLI's results_dir / ticker / analysis-date layout."""
     try:

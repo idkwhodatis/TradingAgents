@@ -72,7 +72,7 @@ def test_all_markets_use_resolved_search_subject(ticker, expected, fetched):
 def test_ashare_official_and_bilingual_evidence_are_separate_and_snapshot_immutable(monkeypatch, fetched):
     off = Mock(return_value={"status": "empty", "evidence": [], "diagnostics": {}})
     monkeypatch.setattr(official, "fetch_announcements", off)
-    with run_config({"_ashare_identity": deepcopy(IDENTITY)}):
+    with run_config({"_ashare_identity": deepcopy(IDENTITY), "duckduckgo_news_max_queries": 4}):
         before = get_config()
         out = evidence.retrieve_news(lambda: evidence.NewsText("empty"), "601868.SS", "2026-04-01", "2026-04-03")
         assert get_config() == before
@@ -198,6 +198,22 @@ def test_one_query_budget_prioritizes_news_over_official(monkeypatch, fetched):
     assert fetched.call_count == 1
     assert fetched.call_args.args[3]["duckduckgo_news_max_queries"] == 1
     announcement.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("config", "news_queries", "official_calls"),
+    [({}, 1, 1), ({"duckduckgo_news_max_queries": 3}, 2, 1),
+     ({"ashare_announcements_enabled": False}, 2, 0)],
+)
+def test_default_and_explicit_query_caps_remain_shared(
+    monkeypatch, fetched, config, news_queries, official_calls,
+):
+    announcement = Mock(return_value={"status": "empty", "evidence": [], "diagnostics": {}})
+    monkeypatch.setattr(official, "fetch_announcements", announcement)
+    with run_config({"_ashare_identity": IDENTITY, **config}):
+        evidence.retrieve_news(lambda: evidence.NewsText("empty"), "601868.SS", "2026-04-01", "2026-04-03")
+    assert fetched.call_args.args[3]["duckduckgo_news_max_queries"] == news_queries
+    assert announcement.call_count == official_calls
 
 
 def test_official_challenge_sets_shared_cooldown(monkeypatch):

@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime
+from importlib import import_module
 
 import pytest
 import requests
@@ -14,14 +15,36 @@ NOW = datetime(2026, 10, 8, 16, tzinfo=UTC)
 START, END = "2026-10-01", "2026-10-08"
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 100.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds > 0
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 @pytest.fixture(autouse=True)
 def clean_cache(monkeypatch):
+    from tradingagents.extensions import ashare_announcements, news_evidence
+
+    clock = FakeClock()
+    for module in (ddg, ashare_announcements, news_evidence):
+        monkeypatch.setattr(module, "time", clock)
     ddg._CACHE.clear()
+    ashare_announcements._CACHE.clear()
+    monkeypatch.setattr(ddg, "_LAST_REQUEST_STARTED", None)
     monkeypatch.setattr(ddg, "_BLOCK_UNTIL", 0.0)
     monkeypatch.setattr(ddg, "_BLOCK_REASON", "")
     monkeypatch.setattr(ddg, "_utcnow", lambda: NOW)
-    yield
+    yield clock
     ddg._CACHE.clear()
+    ashare_announcements._CACHE.clear()
 
 
 def article(**changes):
@@ -52,12 +75,17 @@ class Response:
         self.closed = True
 
 
-def wire(monkeypatch, responses):
+def wire(monkeypatch, responses, *, starts=None):
+    # Load type annotations depending on requests.Session before replacing its
+    # constructor. This fixture must also work when this file is tested alone.
+    import_module("tradingagents.extensions.company_website")
     calls = []
     session = requests.Session()
     responses = iter(responses)
 
     def get(url, **kwargs):
+        if starts is not None:
+            starts.append(ddg.time.monotonic())
         calls.append((url, kwargs))
         response = next(responses)
         if isinstance(response, Exception):
@@ -498,7 +526,10 @@ def test_default_total_deadline_covers_multiple_queries(monkeypatch):
         return []
 
     monkeypatch.setattr(ddg, "_search", search)
-    result = ddg.fetch_news(["one", "two", "three", "four"], START, END, {})
+    result = ddg.fetch_news(
+        ["one", "two", "three", "four"], START, END,
+        {"duckduckgo_news_max_queries": 4},
+    )
     assert calls == [145.0, 145.0]
     assert result["diagnostics"]["stop_reason"] == "budget_exhausted"
     assert ddg.block_status() is None
@@ -562,6 +593,12 @@ def test_query_and_total_result_limits(monkeypatch):
         ("total_timeout", 121),
         ("total_timeout", float("inf")),
         ("total_timeout", True),
+        ("min_interval", -1),
+        ("min_interval", 31),
+        ("min_interval", float("nan")),
+        ("min_interval", float("inf")),
+        ("min_interval", True),
+        ("min_interval", "invalid"),
         ("max_queries", 9),
         ("max_queries", 1.1),
         ("max_results", 31),
@@ -856,3 +893,238 @@ def test_syndicated_duplicates_merge_query_attribution(monkeypatch):
     assert result["evidence"][0]["queries"] == ["中国能建", "China Energy Engineering"]
     assert result["evidence"][0]["query_languages"] == ["zh", "und"]
     assert len(result["evidence"][0]["alternate_sources"]) == 1
+
+
+def test_defaults_limit_queries_and_pace_every_http_request(monkeypatch, clean_cache):
+    starts = []
+    calls = wire(monkeypatch, [
+        Response('vqd="first"'), news_response([]),
+        Response('vqd="second"'), news_response([]),
+    ], starts=starts)
+    result = ddg.fetch_news(["first", "second", "third"], START, END, {})
+    assert result["status"] == "empty"
+    assert [options["params"]["q"] for _, options in calls] == [
+        "first", "first", "second", "second",
+    ]
+    assert starts == [100, 103, 106, 109]
+    assert clean_cache.sleeps == [3, 3, 3]  # No sleep after the final response.
+    assert result["diagnostics"]["queries_truncated"] == 1
+    assert result["diagnostics"]["limits"]["max_queries"] == 2
+    assert result["diagnostics"]["limits"]["min_interval"] == 3
+
+
+@pytest.mark.parametrize("interval", [0, 0.5, 30])
+def test_interval_bounds_and_zero_without_sleep(monkeypatch, clean_cache, interval):
+    starts = []
+    wire(monkeypatch, [Response('vqd="first"'), news_response([])], starts=starts)
+    result = ddg.fetch_news(["first"], START, END, {
+        "duckduckgo_news_min_interval": interval,
+    })
+    assert result["status"] == "empty"
+    assert starts == [100, 100 + interval]
+    assert clean_cache.sleeps == ([interval] if interval else [])
+
+
+def test_response_time_counts_toward_start_interval(monkeypatch, clean_cache):
+    starts = []
+
+    class SlowResponse(Response):
+        def iter_content(self, chunk_size):
+            clean_cache.now += 2
+            yield from super().iter_content(chunk_size)
+
+    wire(monkeypatch, [SlowResponse('vqd="first"'), news_response([])], starts=starts)
+    assert ddg.fetch_news(["first"], START, END, {})["status"] == "empty"
+    assert starts == [100, 103]
+    assert clean_cache.sleeps == [1]
+
+
+def test_new_tool_calls_share_pacing_but_cache_hits_do_not_wait(monkeypatch, clean_cache):
+    starts = []
+    wire(monkeypatch, [
+        Response('vqd="first"'), news_response([]),
+        Response('vqd="second"'), news_response([]),
+    ], starts=starts)
+    ddg.fetch_news(["first"], START, END, {})
+    cached = ddg.fetch_news(["first"], START, END, {"duckduckgo_news_min_interval": 30})
+    assert cached["diagnostics"]["cache_hit"]
+    assert clean_cache.sleeps == [3]
+    ddg.fetch_news(["second"], START, END, {})
+    assert starts == [100, 103, 106, 109]
+    assert clean_cache.sleeps == [3, 3, 3]
+
+
+def test_wait_that_cannot_fit_shared_deadline_stops_without_sleep(monkeypatch, clean_cache):
+    starts = []
+    wire(monkeypatch, [Response('vqd="first"'), news_response([])], starts=starts)
+    result = ddg.fetch_news(["first", "second"], START, END, {
+        "duckduckgo_news_min_interval": 30,
+        "_duckduckgo_news_deadline": 145.0,
+    })
+    assert starts == [100, 130]
+    assert clean_cache.sleeps == [30]
+    assert clean_cache.now == 130
+    assert result["diagnostics"]["stop_reason"] == "budget_exhausted"
+    assert ddg.block_status() is None
+
+
+def test_wait_exactly_to_deadline_never_starts_or_spins(monkeypatch, clean_cache):
+    starts = []
+    wire(monkeypatch, [Response('vqd="first"')], starts=starts)
+    result = ddg.fetch_news(["first", "second"], START, END, {
+        "_duckduckgo_news_deadline": 103.0,
+    })
+    assert starts == [100]
+    assert clean_cache.sleeps == []
+    assert result["diagnostics"]["stop_reason"] == "budget_exhausted"
+    assert ddg.block_status() is None
+
+
+@pytest.mark.parametrize("event", ["deadline", "block"])
+def test_wait_rechecks_deadline_and_cooldown_before_network(monkeypatch, clean_cache, event):
+    starts = []
+    wire(monkeypatch, [Response('vqd="first"')], starts=starts)
+
+    def wake_after_event(delay):
+        clean_cache.sleeps.append(delay)
+        clean_cache.now += delay
+        if event == "deadline":
+            clean_cache.now = 145
+        else:
+            ddg.record_block("http_202_blocked")
+
+    monkeypatch.setattr(clean_cache, "sleep", wake_after_event)
+    result = ddg.fetch_news(["first", "second"], START, END, {})
+    assert starts == [100]
+    assert clean_cache.sleeps == [3]
+    assert result["diagnostics"]["stop_reason"] == (
+        "budget_exhausted" if event == "deadline" else "http_202_blocked"
+    )
+    assert bool(ddg.block_status()) is (event == "block")
+
+
+@pytest.mark.parametrize("acquired", [False, True])
+def test_gate_contention_obeys_deadline_without_retry(monkeypatch, clean_cache, acquired):
+    class BusyGate:
+        def __init__(self):
+            self.attempts = []
+            self.released = False
+
+        def acquire(self, *, timeout):
+            self.attempts.append(timeout)
+            clean_cache.now += timeout
+            return acquired
+
+        def release(self):
+            self.released = True
+
+    gate = BusyGate()
+    monkeypatch.setattr(ddg, "_REQUEST_LOCK", gate)
+    calls = wire(monkeypatch, [])
+    result = ddg.fetch_news(["first", "second"], START, END, {})
+    assert gate.attempts == [45]
+    assert gate.released is acquired
+    assert calls == [] and clean_cache.sleeps == []
+    assert result["diagnostics"]["stop_reason"] == "budget_exhausted"
+    assert ddg.block_status() is None
+
+
+@pytest.mark.parametrize("blocked_endpoint", ["token", "news"])
+def test_second_query_202_stops_third_and_all_announcement_paths(
+    monkeypatch, clean_cache, blocked_endpoint,
+):
+    from tests.test_news_evidence_extension import IDENTITY
+    from tradingagents.dataflows.config import run_config
+    from tradingagents.extensions import (
+        ashare_announcements as official,
+        company_website,
+        news_evidence,
+    )
+
+    responses = [Response('vqd="first"'), news_response([article()])]
+    if blocked_endpoint == "news":
+        responses.append(Response('vqd="second"'))
+    responses.append(Response("Accepted", 202))
+    starts = []
+    calls = wire(monkeypatch, responses, starts=starts)
+    monkeypatch.setattr(company_website, "resolve_company_website", lambda *a: None)
+    with run_config({"_ashare_identity": IDENTITY, "duckduckgo_news_max_queries": 4}):
+        output = news_evidence.retrieve_news(lambda: "", "601868.SS", START, END)
+    count = 4 if blocked_endpoint == "news" else 3
+    assert len(calls) == count
+    assert starts == [100 + 3 * i for i in range(count)]
+    assert clean_cache.sleeps == [3] * (count - 1)
+    assert "http_202_blocked" in output
+    assert '"status": "partial"' in output
+    assert "skipped_after_search_stop" in output
+    assert article()["title"] in output
+    assert not any(url == official.SEARCH_URL for url, _ in calls)
+    # A later tool or direct announcement call also fails closed without any wait.
+    blocked_until = ddg._BLOCK_UNTIL
+    assert ddg.fetch_news(["new company"], START, END, {})["diagnostics"]["reason"] == "provider_cooldown"
+    assert official.fetch_announcements(IDENTITY, START, END, {})["diagnostics"]["cooldown"]
+    assert len(calls) == count and len(clean_cache.sleeps) == count - 1
+    assert blocked_until == ddg._BLOCK_UNTIL
+
+
+@pytest.mark.parametrize("interval", [0, 2.5, 3])
+def test_official_discovery_uses_same_process_request_gate(monkeypatch, clean_cache, interval):
+    from tests.test_news_evidence_extension import IDENTITY, _html
+    from tradingagents.extensions import ashare_announcements as official
+
+    starts = []
+    calls = wire(monkeypatch, [
+        Response('vqd="first"'), news_response([]), Response(_html()),
+    ], starts=starts)
+    config = {"duckduckgo_news_min_interval": interval, "_duckduckgo_news_deadline": 145.0}
+    ddg.fetch_news(["first"], START, END, config)
+    result = official.fetch_announcements(IDENTITY, "2026-04-01", "2026-04-03", config)
+    assert result["status"] == "ok"
+    assert [url for url, _ in calls] == [ddg.SEARCH_URL, ddg.NEWS_URL, official.SEARCH_URL]
+    assert starts == [100, 100 + interval, 100 + 2 * interval]
+    assert clean_cache.sleeps == ([interval, interval] if interval else [])
+
+
+def test_official_pacing_uses_remaining_shared_budget(monkeypatch, clean_cache):
+    from tests.test_news_evidence_extension import IDENTITY
+    from tradingagents.extensions import ashare_announcements as official
+
+    starts = []
+    calls = wire(monkeypatch, [Response('vqd="first"'), news_response([])], starts=starts)
+    config = {"duckduckgo_news_min_interval": 30, "_duckduckgo_news_deadline": 145.0}
+    ddg.fetch_news(["first"], START, END, config)
+    result = official.fetch_announcements(IDENTITY, START, END, config)
+    assert len(calls) == 2
+    assert clean_cache.sleeps == [30]
+    assert result["diagnostics"]["reason"] == "budget_exhausted"
+    assert ddg.block_status() is None
+
+
+def test_official_202_immediately_stops_new_news_requests(monkeypatch, clean_cache):
+    from tests.test_news_evidence_extension import IDENTITY
+    from tradingagents.extensions import ashare_announcements as official
+
+    calls = wire(monkeypatch, [Response("Accepted", 202)])
+    result = official.fetch_announcements(IDENTITY, START, END, {})
+    assert result["diagnostics"]["reason"] == "http_202_blocked"
+    assert ddg.fetch_news(["company"], START, END, {})["diagnostics"]["reason"] == "provider_cooldown"
+    assert len(calls) == 1
+    assert clean_cache.sleeps == []
+
+
+def test_provider_block_is_recorded_before_request_gate_opens(monkeypatch):
+    underlying_gate = ddg._REQUEST_LOCK
+    observed = []
+
+    class ObservedGate:
+        def acquire(self, **kwargs):
+            return underlying_gate.acquire(**kwargs)
+
+        def release(self):
+            observed.append(ddg.block_status())
+            underlying_gate.release()
+
+    monkeypatch.setattr(ddg, "_REQUEST_LOCK", ObservedGate())
+    wire(monkeypatch, [Response("Accepted", 202)])
+    ddg.fetch_news(["company"], START, END, {})
+    assert observed == [{"reason": "http_202_blocked", "retry_after_seconds": 60}]
