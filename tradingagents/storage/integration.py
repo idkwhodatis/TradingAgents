@@ -13,7 +13,7 @@ def persist_report(store, final_state: dict, settings: dict) -> None:
     Deriving section keys from the existing renderer preserves new report types
     without schema migrations. Message objects, holdings and raw config stay out.
     """
-    keys = {"company_of_interest", "trade_date", "final_rating", "memory_note"}
+    keys = {"company_of_interest", "trade_date", "final_rating", "memory_note", "instrument_identity"}
     keys.update(path[0] for _, _, agents in _SECTIONS for _, _, path in agents)
     state = {key: value for key, value in final_state.items() if key in keys}
     store.write_artifact("report_state.json", json.dumps(state, ensure_ascii=False), "application/json")

@@ -7,6 +7,7 @@ from typing import Any
 
 from tradingagents.dataflows.date_window import is_historical
 from tradingagents.dataflows.vendors.yahoo.fundamentals import get_company_profile
+from tradingagents.extensions.ashare_identity import identity_for, render_identity
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def _clean_identity_value(value: Any) -> str | None:
     return cleaned
 
 
-def resolve_instrument_identity(ticker: str) -> dict:
+def resolve_instrument_identity(ticker: str, config: dict | None = None) -> dict:
     """Resolve deterministic identity metadata (company name, sector, …) for a ticker.
 
     This exists to stop the pipeline from hallucinating a *different* company
@@ -75,6 +76,19 @@ def resolve_instrument_identity(ticker: str) -> dict:
     Identity resolves for the same instrument the price path fetches
     (``XAUUSD`` -> ``GC=F``, #983).
     """
+    # A run's verified mainland snapshot is authoritative for identity only.
+    # Unavailable metadata stays explicit; a confirmed non-A security keeps
+    # the existing vendor identity path (indices and ETFs are outside scope).
+    snapshot = identity_for(ticker, config)
+    if snapshot is not None and snapshot.get("status") != "not_a_share":
+        if snapshot.get("status") == "resolved":
+            # Keep the established resolver contract for consumers such as the
+            # optional post relevance screen, without changing the saved schema.
+            name = (snapshot.get("chinese_full_name") or snapshot.get("chinese_short_name")
+                    or snapshot.get("english_name"))
+            if name:
+                snapshot["company_name"] = name
+        return snapshot
     try:
         return _identity(ticker)
     except Exception as exc:  # noqa: BLE001 — fail open, never block the run
@@ -107,7 +121,7 @@ def _identity(ticker: str) -> dict:
 def build_instrument_context(
     ticker: str,
     asset_type: str = "stock",
-    identity: Mapping[str, str] | None = None,
+    identity: Mapping[str, Any] | None = None,
     trade_date: str | None = None,
 ) -> str:
     """Describe the exact instrument so agents preserve identity and ticker.
@@ -132,6 +146,15 @@ def build_instrument_context(
     )
 
     identity = identity or {}
+    if (identity.get("canonical_symbol") == ticker
+            and identity.get("status") in {"resolved", "unavailable"}):
+        context += "\n\n" + render_identity(dict(identity))
+        if is_historical(trade_date):
+            context += (
+                f" These are current identity names, not point-in-time evidence for {trade_date}; "
+                "the company may have been named differently on that date."
+            )
+        return context
     name = identity.get("company_name") or identity.get("name")
     label = "Name" if is_crypto else "Company"
     details = []
@@ -184,6 +207,8 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     return build_instrument_context(
         str(state["company_of_interest"]),
         state.get("asset_type", "stock"),
+        identity=state.get("instrument_identity"),
+        trade_date=state.get("trade_date"),
     )
 
 

@@ -28,6 +28,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_STORAGE_BACKEND":      "storage_backend",
     "TRADINGAGENTS_STORAGE_DB_PATH":      "storage_db_path",
     "TRADINGAGENTS_STORAGE_MAX_ARTIFACT_BYTES": "storage_max_artifact_bytes",
+    "TRADINGAGENTS_ASHARE_IDENTITY_ENABLED": "ashare_identity_enabled",
+    "TRADINGAGENTS_ASHARE_IDENTITY_TIMEOUT": "ashare_identity_timeout",
+    "TRADINGAGENTS_ASHARE_IDENTITY_CACHE_TTL": "ashare_identity_cache_ttl",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
@@ -168,6 +171,11 @@ def build_default_config() -> dict:
             "ECB Bank of England BOJ central bank policy",
             "oil commodities supply chain energy",
         ],
+        # Identity-only extension: exact official mainland A-equity lookup.
+        # Other markets and configured price/news vendor chains stay unchanged.
+        "ashare_identity_enabled": True,
+        "ashare_identity_timeout": 5.0,      # per HTTP request, seconds (0.1..30)
+        "ashare_identity_cache_ttl": 86400,  # bounded in-process current-name cache
         # Data vendor configuration
         # Category-level configuration (default for all tools in category).
         # The configured value is the exact vendor chain — requests are NOT silently

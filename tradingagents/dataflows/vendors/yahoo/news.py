@@ -11,6 +11,7 @@ from tradingagents.dataflows.date_window import coverage_gap, in_window
 from tradingagents.dataflows.errors import VendorUnavailableError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import yf_retry
+from tradingagents.extensions.ashare_identity import identity_for, news_queries
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -61,15 +62,50 @@ def _search_news(canonical: str, limit: int) -> tuple[list, bool]:
     relevance-picked sample, and some are tagged loosely; only those tagged with
     the symbol are about it.
     """
-    search = yf_retry(lambda: yf.Search(canonical, news_count=limit))
-    if search is None:  # Yahoo answered "not found": its search is down
-        return [], False
-    tagged = [
-        a for a in (search.news or [])
-        if canonical in (t.upper() for t in a.get("relatedTickers") or [])
-    ]
-    knows = any((q.get("symbol") or "").upper() == canonical for q in search.quotes or [])
-    return tagged, knows or bool(search.news)
+    # Names come only from this run's exchange-verified identity snapshot. They
+    # improve discovery, never attribution: even a perfect name/title match
+    # must carry Yahoo's exact canonical relatedTicker before we include it.
+    queries = list(dict.fromkeys([canonical, *news_queries(canonical)]))
+    tagged = []
+    seen = set()
+    answered = False
+    for query in queries:
+        try:
+            search = yf_retry(lambda q=query: yf.Search(q, news_count=limit))
+        except VendorUnavailableError:
+            if query == canonical:
+                raise  # Preserve the existing primary-query vendor fallback.
+            continue  # Optional name enrichment must not discard valid results.
+        if search is None:
+            continue
+        knows = any((q.get("symbol") or "").upper() == canonical for q in search.quotes or [])
+        answered = answered or knows or bool(search.news)
+        for article in search.news or []:
+            tickers = article.get("relatedTickers") or []
+            if canonical not in (t.upper() for t in tickers if isinstance(t, str)):
+                continue
+            # Preserve other markets' single-query behavior. Across A-share
+            # name queries, the same article can appear repeatedly or in both
+            # Yahoo formats, so use the id/link before a content fingerprint.
+            if len(queries) > 1:
+                data = _extract_article_data(article)
+                content = article.get("content") or {}
+                article_id = article.get("uuid") or article.get("id")
+                if isinstance(content, dict):
+                    article_id = article_id or content.get("id")
+                keys = set()
+                if article_id:
+                    keys.add(("id", article_id))
+                if data["link"]:
+                    keys.add(("link", data["link"]))
+                if not keys:
+                    keys.add(("content", data["title"], data["publisher"], data["pub_date"]))
+                duplicate = bool(seen.intersection(keys))
+                seen.update(keys)
+                if duplicate:
+                    continue
+            tagged.append(article)
+    return tagged, answered
 
 
 def _format_articles(articles: list[dict]) -> str:
@@ -97,11 +133,23 @@ def get_news_yfinance(
     next vendor is tried. Search results are a sample, so finding none in the
     window never reads as "no news".
     """
-    article_limit = get_config()["news_article_limit"]
+    config = get_config()
+    article_limit = config["news_article_limit"]
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently
     # returns no news. Keep the user's ticker in the report header.
     canonical = normalize_symbol(ticker)
+    identity = identity_for(canonical, config=config)
+    verified_ashare = bool(
+        identity and identity.get("status") == "resolved"
+        and identity.get("security_type") == "A-share" and identity.get("confidence") == "verified"
+    )
+    coverage_note = (
+        "\n\nA-share coverage note: exchange identity and its provenance concern company "
+        "identification only. They do not establish Yahoo/overseas news coverage. "
+        "This feed may be incomplete and does not replace official exchange/issuer announcements."
+        if verified_ashare else ""
+    )
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     subject = f"news for {ticker}{resolved}"
     feed = yf_retry(lambda: yf.Ticker(canonical).get_news(count=article_limit)) or []
@@ -109,29 +157,39 @@ def get_news_yfinance(
     if not feed:
         found, answered = _search_news(canonical, article_limit)
         if not answered:
-            raise VendorUnavailableError(f"Yahoo Finance returned no news response for {canonical}")
+            raise VendorUnavailableError(
+                f"Yahoo Finance returned no news response for {canonical}{coverage_note}"
+            )
         if not found:
             # With the quote feed empty, no tagged article says nothing about the
             # company's news (Yahoo tags no article with most non-US listings).
-            raise VendorUnavailableError(f"Yahoo Finance has no news articles tagged {canonical}")
+            raise VendorUnavailableError(
+                f"Yahoo Finance has no news articles tagged {canonical}{coverage_note}"
+            )
         articles = [_extract_article_data(a) for a in found]
 
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     # Keep only articles within the requested window (look-ahead safe).
     in_range = [a for a in articles if in_window(a["pub_date"], start_dt, end_dt)]
+    if verified_ashare:
+        # The budget counts usable articles, not the candidates accumulated
+        # across bilingual searches. Out-of-window hits cannot spend it.
+        in_range = in_range[:article_limit]
     if in_range:
-        return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{_format_articles(in_range)}"
+        return (f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n"
+                f"{_format_articles(in_range)}{coverage_note}")
 
     if not feed:
         return (f"<Yahoo Finance news unavailable for {start_date}..{end_date}: Yahoo search "
                 f"returns only a sample of recent articles about {canonical}, so this is not "
-                f"an absence of {subject}>")
+                f"an absence of {subject}>{coverage_note}")
     gap = coverage_gap(
         (a["pub_date"] for a in articles),
         start_date, end_date, "Yahoo Finance news", subject,
     )
-    return gap or f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
+    result = gap or f"No news found for {ticker}{resolved} between {start_date} and {end_date}"
+    return result + coverage_note
 
 
 def get_global_news_yfinance(

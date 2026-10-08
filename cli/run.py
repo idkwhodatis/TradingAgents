@@ -35,6 +35,7 @@ from tradingagents.agents.rating import is_review, run_rating
 from tradingagents.dataflows.config import run_config
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.extensions.ashare_identity import prepare_instrument
 from tradingagents.graph.analyst_execution import build_analyst_execution_plan
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.storage import create_run
@@ -310,6 +311,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None, *, 
         selections = get_user_selections(flags) if flags is not None else get_user_selections()
     if config is None:
         config = _build_run_config(selections, checkpoint)
+    ticker, config = prepare_instrument(selections["ticker"], selections["asset_type"], config)
+    selections = {**selections, "ticker": ticker}
     mode = progress_mode if progress_mode is not None else ("live" if interactive else "off")
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints

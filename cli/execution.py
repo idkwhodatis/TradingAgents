@@ -64,6 +64,9 @@ def execute_graph(
     asset_type, portfolio = request.asset_type, request.portfolio
     try:
         init_state = graph.create_run_state(ticker, trade_date, asset_type, portfolio)
+        # The graph verifies bare mainland codes before checkpoint identity is
+        # chosen. Use that same canonical symbol for memory and cleanup too.
+        ticker = init_state.get("company_of_interest", ticker)
         checkpoint_tid = graph.begin_checkpoint(ticker, trade_date, asset_type, portfolio)
         if checkpoint_tid is not None:
             observer.on_checkpoint()

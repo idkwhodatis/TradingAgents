@@ -254,6 +254,16 @@ TradingAgents works with any market Yahoo Finance covers, using the exchange-suf
 - China A-shares: Shanghai `.SS`, Shenzhen `.SZ` (e.g. `600519.SS` for Kweichow Moutai)
 - Crypto: `BTC-USD`, `ETH-USD`
 
+The mainland identity adapter also accepts bare six-digit **stock** codes in both
+CLI modes: `tradingagents analyze 601868 --language Chinese` resolves the verified
+SSE listing and carries **中国能建**, **中国能源建设股份有限公司**, and its official
+English name into context and reports. Bare `000001` selects the A-equity universe
+(Ping An Bank `.SZ`); explicit `000001.SS` remains the Shanghai index. Names are
+current source labels, not historical evidence. SZSE English is optional and
+provider-labelled; BSE identity is unsupported. This does not guarantee official
+announcement or overseas-news coverage. See the [adapter source, configuration,
+coverage and upstream-sync guide](docs/ashare-identity-adapter.md).
+
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>

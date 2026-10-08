@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,12 @@ from tradingagents.dataflows.config import run_config, run_config_context, set_c
 from tradingagents.dataflows.date_window import get_current_date, is_historical
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.extensions.ashare_identity import (
+    identity_for,
+    prepare_instrument,
+    render_identity,
+    signature_identity,
+)
 from tradingagents.llm_clients import create_tier_client, tier_provider
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
@@ -48,6 +55,7 @@ def _validate_trade_date(trade_date) -> str:
 _NOT_IN_SIGNATURE = frozenset({
     "results_dir", "data_cache_dir", "memory_log_path", "checkpoint_enabled", "llm_max_retries",
     "storage_backend", "storage_db_path", "storage_max_artifact_bytes",
+    "_ashare_identity", "ashare_identity_enabled", "ashare_identity_timeout", "ashare_identity_cache_ttl",
 })
 
 
@@ -70,10 +78,12 @@ class TradingAgentsGraph:
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
         """
         self.debug = debug
-        self.config = config or DEFAULT_CONFIG
+        self.config = deepcopy(config or DEFAULT_CONFIG)
         self.callbacks = callbacks or []
 
-        set_config(self.config)
+        # Keep legacy vendor defaults, but never publish one run's identity to
+        # other graphs/tools through the process-wide configuration.
+        set_config({key: value for key, value in self.config.items() if key != "_ashare_identity"})
 
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
@@ -121,13 +131,13 @@ class TradingAgentsGraph:
                                    trade_date: str | None = None) -> str:
         """Resolve ticker identity once and return the full instrument context.
 
-        Deterministic yfinance lookup (cached, fail-open) injected into a
-        context string so every agent anchors to the real company instead of
+        A pinned mainland exchange identity, or the existing fail-open Yahoo
+        lookup, is injected so every agent anchors to the real company instead of
         hallucinating one from the price chart (#814). Both the propagate()
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
         """
-        identity = resolve_instrument_identity(ticker)
+        identity = resolve_instrument_identity(ticker, self.config)
         return build_instrument_context(ticker, asset_type, identity, trade_date)
 
     def _memory_as_of(self, trade_date) -> str | None:
@@ -151,6 +161,10 @@ class TradingAgentsGraph:
         the run keeps its files and how it retries are left out.
         """
         settings = {k: v for k, v in self.config.items() if k not in _NOT_IN_SIGNATURE}
+        identity = signature_identity(self.config)
+        if identity is not None and identity.get("status") != "not_a_share":
+            settings["instrument_identity"] = identity
+            settings["ashare_identity_enabled"] = self.config.get("ashare_identity_enabled", True)
         digest = hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode()).hexdigest()[:12]
         return "|".join([
             "analysts=" + ",".join(self.selected_analysts),
@@ -184,6 +198,12 @@ class TradingAgentsGraph:
         PortfolioRating enum.
         """
         trade_date = _validate_trade_date(trade_date)
+        # A reused SDK graph starts a new identity lifecycle. Provider cache
+        # freshness applies again, while all steps inside this run share one
+        # immutable snapshot (including its checkpoint signature).
+        config = {key: value for key, value in self.config.items() if key != "_ashare_identity"}
+        company_name, self.config = prepare_instrument(company_name, asset_type, config)
+        self._identity_lifecycle_ended = False
 
         # Every invocation gets its own archive ID, even when the same graph is
         # reused. This is separate from the stable resumable checkpoint identity.
@@ -248,6 +268,9 @@ class TradingAgentsGraph:
 
     def end_checkpoint(self):
         """Restore the plain uncheckpointed graph after a checkpointed run."""
+        # Keep the completed snapshot available to reports, but refresh it
+        # when this graph is next reused by the direct CLI execution contract.
+        self._identity_lifecycle_ended = True
         if self._checkpointer_ctx is not None:
             self._checkpointer_ctx.__exit__(None, None, None)
             self._checkpointer_ctx = None
@@ -299,6 +322,9 @@ class TradingAgentsGraph:
         an explicit ``save_path`` or let it default under ``results_dir``; the
         report is also written as one HTML page unless ``html`` is False.
         """
+        identity = final_state.get("instrument_identity") or {}
+        if identity.get("canonical_symbol") == final_state.get("company_of_interest"):
+            ticker = identity.get("canonical_symbol") or ticker
         if save_path is None:
             save_path = self.default_report_path(ticker)
         return write_report_tree(final_state, ticker, save_path, settings=self.run_settings(), html=html)
@@ -315,13 +341,23 @@ class TradingAgentsGraph:
         memory log's lessons are not here: the graph's Memory Log step settles
         and loads them alongside the analysts (see ``_memory_step``).
         """
-        return self.propagator.create_initial_state(
+        config = self.config
+        if getattr(self, "_identity_lifecycle_ended", False):
+            config = {key: value for key, value in config.items() if key != "_ashare_identity"}
+        company_name, self.config = prepare_instrument(company_name, asset_type, config)
+        self._identity_lifecycle_ended = False
+        state = self.propagator.create_initial_state(
             company_name,
             trade_date,
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
         )
+        identity = identity_for(company_name, self.config)
+        if identity is not None and identity.get("status") != "not_a_share":
+            state["instrument_identity"] = identity
+            state["instrument_identity_report"] = render_identity(identity)
+        return state
 
     def _memory_step(self, state):
         """The graph's Memory Log step, alongside the analysts (#1428): settle every
@@ -481,6 +517,9 @@ class TradingAgentsGraph:
             "final_rating": run_rating(final_state),
             "run_settings": self.run_settings(),
         }
+        for key in ("instrument_identity", "instrument_identity_report"):
+            if final_state.get(key):
+                entry[key] = final_state[key]
 
         store = getattr(self, "run_store", None)
         own_store = store is None

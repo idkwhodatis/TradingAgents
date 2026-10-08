@@ -19,6 +19,7 @@ from cli.models import AnalystType
 from cli.run_output import run_directory
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
+from tradingagents.extensions.ashare_identity import identity_for, prepare_instrument
 from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
 from tradingagents.llm_clients.factory import tier_provider
 from tradingagents.llm_clients.headers import parse_llm_headers
@@ -229,7 +230,9 @@ def run_headless_analysis(
     book = load_portfolio(portfolio_path) if portfolio_path is not None else None
     if output_dir is not None and Path(output_dir).expanduser().exists() and not Path(output_dir).expanduser().is_dir():
         raise ValueError("--output-dir must be a directory")
-    run_settings = deepcopy(config)  # Never relocate results_dir under runs/.
+    # Identity resolution must precede every persistent run identifier: a bare
+    # mainland code is unsafe until an exchange has verified the A-share.
+    ticker, run_settings = prepare_instrument(ticker, asset_type, config)
     directory = run_directory(run_settings, ticker, trade_date).resolve()
     run_store = create_run(run_settings, ticker, trade_date)
     if run_store is None:
@@ -253,6 +256,9 @@ def run_headless_analysis(
         "log_file": str(directory / "message_tool.log"),
         "report": None,
     }
+    identity = identity_for(ticker, run_settings)
+    if identity is not None and identity.get("status") != "not_a_share":
+        summary["instrument_identity"] = identity
 
     if run_store is not None:
         summary.update(output_dir=None, log_file=None, storage_backend="sqlite",
