@@ -1,4 +1,4 @@
-"""Current mainland A-share identities from official, exact-code metadata.
+"""Current mainland A-share identities from sourced, exact-code metadata.
 
 This is an identity/query adapter, not an announcement or news vendor. It never
 translates names, rewrites vendor chains, or treats a numeric symbol as proof of
@@ -24,6 +24,7 @@ from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_compon
 
 SSE_URL = "https://query.sse.com.cn/commonQuery.do"
 SZSE_URL = "https://www.szse.cn/api/report/ShowReport/data"
+BSE_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax"
 YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 SSE_PROFILE = "COMMON_SSE_CP_GPJCTPZ_GPLB_GPGK_GSGK_C"
 _CANDIDATE = re.compile(r"^(\d{6})(?:\.(SS|SZ|BJ))?$")
@@ -54,7 +55,7 @@ def _number(config, key, default, low, high):
 
 
 def _get_json(url, params, referer, timeout):
-    response = requests.get(url, params=params, headers={"Referer": referer}, timeout=timeout)
+    response = requests.get(url, params=params, headers={"Referer": referer} if referer else None, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
@@ -102,6 +103,35 @@ def _szse(code: str, timeout: float) -> dict | None:
             "source": {"provider": "SZSE", "url": SZSE_URL}}
 
 
+def _bse(code: str, timeout: float) -> dict | None:
+    """Exact current BSE A-equity metadata; names are provider labels.
+
+    Eastmoney is independent of the exchange and is never labelled official.
+    Old security codes are not rewritten: historical ticker availability and
+    dated code transitions require a separate security-master/history layer.
+    """
+    payload = _get_json(BSE_URL, {"code": f"BJ{code}"}, None, timeout)
+    if not isinstance(payload, dict) or not isinstance(payload.get("jbzl"), list):
+        raise ValueError("Unexpected BSE provider response")
+    rows = [row for row in payload["jbzl"] if isinstance(row, dict)
+            and row.get("SECURITY_CODE") == code and row.get("STR_CODEA") == code
+            and row.get("SECUCODE") == f"{code}.BJ"
+            and row.get("TRADE_MARKET") == "北京证券交易所"
+            and row.get("SECURITY_TYPE") == "北京证券交易所A股"]
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise ValueError("Ambiguous BSE provider response")
+    row = rows[0]
+    english = _clean(row.get("ORG_NAME_EN"))
+    return {"exchange": "BSE", "canonical_symbol": f"{code}.BJ",
+            "chinese_full_name": _clean(row.get("ORG_NAME")),
+            "chinese_short_name": _clean(row.get("SECURITY_NAME_ABBR")),
+            "english_name": english, "english_name_kind": "provider_label" if english else None,
+            "english_short_name": None, "name_provenance": "provider_label",
+            "source": {"provider": "Eastmoney", "url": BSE_URL + f"?code=BJ{code}"}}
+
+
 def _provider_english(symbol: str, timeout: float) -> dict | None:
     """Optional Yahoo English display label, never an official translation.
 
@@ -134,7 +164,7 @@ def _lookup(exchange, code, timeout, ttl):
             _CACHE.move_to_end(key)
             return deepcopy(cached[1])
     # Failures are never cached or returned as stale evidence.
-    result = (_sse if exchange == "SS" else _szse)(code, timeout)
+    result = {"SS": _sse, "SZ": _szse, "BJ": _bse}[exchange](code, timeout)
     if result is not None:
         if exchange == "SZ" and not result.get("english_name"):
             try:
@@ -181,14 +211,14 @@ def _snapshot(code, canonical, status, record=None, reason=None):
             if record.get(key):
                 source = record.get("english_source") if key == "english_name" else None
                 identity["aliases"].append({"name": record[key], "language": language,
-                                            "kind": "provider_label" if source else kind,
+                                            "kind": "provider_label" if source or record.get("name_provenance") == "provider_label" else kind,
                                             "source": (source or record["source"])["provider"]})
         for key in ("chinese_full_name", "chinese_short_name", "english_name"):
             if not identity.get(key):
                 identity["coverage"].append(f"{key} unavailable; no translation inferred.")
     if status == "resolved":
         chinese = identity.get("chinese_short_name") or identity.get("chinese_full_name")
-        domain = "sse.com.cn" if identity["exchange"] == "SSE" else "szse.cn"
+        domain = {"SSE": "sse.com.cn", "SZSE": "szse.cn", "BSE": "bse.cn"}[identity["exchange"]]
         identity["retrieval_queries"] = {
             "official_announcements": {
                 "queries": [f'{chinese or code} {code} 公告 site:{domain}'],
@@ -199,6 +229,12 @@ def _snapshot(code, canonical, status, record=None, reason=None):
                 "evidence_retrieved": False,
             },
         }
+    if record.get("exchange") == "BSE":
+        identity["coverage"].extend([
+            "BSE names are Eastmoney provider labels, not official exchange identity evidence.",
+            "A provider profile is not a live listing-status or trading-availability check.",
+            "Current BSE ticker only; legacy codes are not automatically remapped. This does not establish historical ticker or price availability.",
+        ])
     return identity
 
 
@@ -207,8 +243,10 @@ def prepare_instrument(ticker: str, asset_type: str, config: dict) -> tuple[str,
 
     Explicit .SH is only a syntactic alias for .SS. No exchange prefix guess is
     used: bare stock inputs select the mainland A-equity universe (not indices),
-    and must match official A-share metadata uniquely, with both
-    supported exchange lookups answering successfully. BSE is explicit unknown.
+    and must match A-share metadata exactly. The official SSE/SZSE lookups
+    must both answer before a bare code resolves. BSE is an independent-provider
+    fallback only when neither official exchange has an A-equity match, so its
+    unavailability cannot break a verified SSE/SZSE resolution.
     """
     copied = deepcopy(config)
     previous = copied.pop("_ashare_identity", None)
@@ -230,9 +268,6 @@ def prepare_instrument(ticker: str, asset_type: str, config: dict) -> tuple[str,
         return canonical, copied
     timeout = _number(copied, "ashare_identity_timeout", 5, 0.1, 30)
     ttl = _number(copied, "ashare_identity_cache_ttl", 86400, 0, 604800)
-    if suffix == "BJ":
-        copied["_ashare_identity"] = _snapshot(code, canonical, "unavailable", reason="BSE identity provider is not available; no company identity inferred.")
-        return canonical, copied
     records, failed = [], False
     for exchange in ([suffix] if suffix else ["SS", "SZ"]):
         try:
@@ -241,11 +276,21 @@ def prepare_instrument(ticker: str, asset_type: str, config: dict) -> tuple[str,
                 records.append(record)
         except (requests.RequestException, ValueError, TypeError, KeyError):
             failed = True  # Never retain exception text/URLs/credentials in metadata.
+    if suffix is None and not failed and not records:
+        try:
+            record = _lookup("BJ", code, timeout, ttl)
+            if record:
+                records.append(record)
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            failed = True
     if suffix is None and (failed or len(records) != 1):
-        raise ValueError(f"Cannot uniquely verify {code} as a mainland A-share; specify an exchange suffix and verify the security type")
+        raise ValueError(f"Cannot uniquely verify {code} as a mainland A-share; specify an exchange suffix and verify the security type. Legacy BSE codes are not automatically converted")
     if len(records) == 1:
         canonical = records[0]["canonical_symbol"]
         identity = _snapshot(code, canonical, "resolved", records[0])
+    elif suffix == "BJ":
+        identity = _snapshot(code, canonical, "unavailable", reason=
+                             "No current BSE A-share identity verified from Eastmoney. Legacy codes are not automatically converted; use a verified current code for current analysis, and validate historical ticker availability separately.")
     else:
         identity = _snapshot(code, canonical, "unavailable" if failed else "not_a_share",
                              reason="Official A-share identity unavailable." if failed else

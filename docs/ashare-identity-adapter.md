@@ -13,20 +13,30 @@ news perspectives.
   **中国能源建设股份有限公司**; official English full name:
   **China Energy Engineering Corporation Limited**.
 - Bare `000001` in the stock input mode resolves **平安银行 / 000001.SZ** only
-  after a unique exact official A-equity match. A bare code deliberately selects
+  after a unique exact official SSE/SZSE A-equity match. A bare code deliberately selects
   the A-equity universe, not a generic index/instrument namespace.
 - Explicit `000001.SS` keeps its Shanghai index identity. It is never rewritten
   to Ping An Bank. Explicit ETF/index symbols retain their legacy metadata path
   and receive no A-company enrichment. Use an explicit exchange suffix for
   indices, ETFs, or any non-equity interpretation.
-- No first-digit rule assigns an exchange. Bare inputs query both supported
-  exchanges and require both responses plus exactly one A-equity match.
+- `920819` / `920819.BJ` → `920819.BJ`, when the exact current BSE listing
+  is confirmed by Eastmoney metadata. Chinese short name: **颖泰生物**;
+  Chinese full name: **北京颖泰嘉和生物科技股份有限公司**; English name:
+  **Nutrichem Company Limited**. All three are provider labels, not official
+  exchange-sourced names.
+- No first-digit rule assigns an exchange. Bare inputs first query official
+  SSE and SZSE metadata. Both must answer successfully, with at most one
+  A-equity match. Only when both return no exact match does the adapter probe
+  BSE through Eastmoney. A BSE outage therefore cannot break an already
+  verified SSE/SZSE identity. Explicit `.BJ` queries only the BSE provider.
   Provider failure, duplicate matches, and unverified bare codes stop before
   analysis/storage. Explicit unknown symbols retain their requested ticker.
 - US, HK, crypto and other non-candidate symbols use their existing behavior.
-- BSE `.BJ` is explicitly unsupported for identity in this release. Its ticker
-  stays intact and names remain unknown; bare BSE codes cannot be resolved.
-  Neither old prefixes nor `920` are sufficient evidence of exchange/type.
+- Legacy BSE codes are **not automatically converted**. Neither an old prefix
+  nor `920` proves exchange/type, and replacing a prefix can identify the wrong
+  security. An old-code request whose provider response contains a different
+  current code is rejected. Use an independently verified current ticker for
+  current analysis; historical symbol validity needs separate verification.
 
 ## Source contract
 
@@ -46,6 +56,19 @@ credentials, or full-company-list download is required.
   from `agjc`. This endpoint supplies the security short name, **not** a legal
   full name or English name. Those fields remain unknown unless another source
   actually provides them.
+- BSE current profile from the independent provider Eastmoney:
+  `https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax`,
+  `code=BJ<code>`. The public GET sends no custom headers or cookies. Exactly one
+  row in `jbzl` must match all of `SECURITY_CODE=<code>`, `STR_CODEA=<code>`,
+  `SECUCODE=<code>.BJ`, `TRADE_MARKET=北京证券交易所`, and
+  `SECURITY_TYPE=北京证券交易所A股`. Cross-market results, ETFs, indices and
+  mismatched codes cannot supply names. `SECURITY_NAME_ABBR`, `ORG_NAME` and
+  `ORG_NAME_EN` supply the short, full and English names when present. Every
+  name alias is marked `provider_label` with Eastmoney provenance; the English
+  name is never promoted to official English. A missing name remains null.
+  A valid empty response is a bounded negative lookup; malformed/ambiguous
+  responses, HTTP errors and timeouts are failures and are not cached. Either
+  outcome leaves an explicit `.BJ` identity unavailable and the ticker intact.
 - When SZSE has no English name, optional Yahoo search
   (`https://query1.finance.yahoo.com/v1/finance/search`) may supply an English
   display label. It must match the exact symbol, `quoteType=EQUITY`, and
@@ -56,17 +79,32 @@ credentials, or full-company-list download is required.
   Chinese identity and explicitly leaves English missing. Parser/failure cases
   are covered by synthetic offline fixtures, not claimed as live observations.
 
-Official live samples (read on 2026-10-08) back the offline fixtures for SSE
-600519/601868 and SZSE 000001. Provider availability/schema changes remain a
-runtime risk; offline tests do not prove future availability.
+Live observations on 2026-10-08 back the official SSE 600519/601868 and SZSE
+000001 fixtures, and representative Eastmoney field subsets for current BSE
+920819/920799/920002/920123. The BSE fixture provenance file distinguishes these
+verified subsets from full raw responses. Mutated failure and rejection cases
+are synthetic offline tests, not claimed as live observations. Provider
+availability/schema changes remain a runtime risk; offline tests do not prove
+future availability.
 
 ## Evidence and temporal limits
 
 Structured state includes names, sourced aliases, exchange/security type,
 resolution status, observation timestamp, current-identity temporality,
-confidence, and explicit coverage gaps. Missing names stay null. These are
-**current names**, not a point-in-time name history. Historical analysis uses
-names only to identify the listing, not as evidence of historical company facts.
+confidence, and explicit coverage gaps. `confidence=verified` means the
+adapter validated an exact listing against the stated source; it does not turn
+an independent provider into an official exchange source. Missing names stay
+null. These are **current names**, not a point-in-time name history. Historical
+analysis uses names only to identify the listing, not as evidence of historical
+company facts.
+
+BSE support is a current-identity extension, not a historical security master.
+It has no old-to-new mapping table or effective-date conversion. Resolving a
+current `920` ticker does not establish that the ticker traded on an earlier
+analysis date, that historical prices are available under it, or that a price
+vendor accepts the canonical `.BJ` symbol. A provider company profile is not a
+live listing-status or trading-availability check. The adapter does not determine
+IPO or delisting dates and does not infer trading eligibility from the prefix.
 
 `retrieval_queries` separates official-announcement search suggestions from
 English/overseas-news suggestions. Both explicitly say `evidence_retrieved=false`:
@@ -101,9 +139,10 @@ The same settings are available to both CLI modes through `.env` or the shell:
 `TRADINGAGENTS_ASHARE_IDENTITY_TIMEOUT=5`, and
 `TRADINGAGENTS_ASHARE_IDENTITY_CACHE_TTL=86400`.
 
-Cache is in-process, bounded to 256 per-exchange entries; negative results have
-at most 60 seconds of reuse. Primary exchange failures are not cached, and expired values are never
-returned as a stale fallback. An optional English lookup failure remains an
+Cache is in-process, bounded to 256 exchange-and-code-keyed entries in total;
+negative results have at most 60 seconds of reuse. Primary identity-provider
+failures are not cached, and expired values are never returned as a stale
+fallback. BSE shares these limits without adding a persistent cache. An optional English lookup failure remains an
 explicit missing field within the successful Chinese identity cache entry until
 that identity TTL expires. A run pins one snapshot. New runs refresh according
 to TTL; graph reuse across tickers cannot transfer a previous ticker's identity.
@@ -138,7 +177,7 @@ ruff check .
 git diff --check
 ```
 
-Focused offline suites: `test_ashare_identity.py`,
+Focused offline suites: `test_ashare_identity.py`, `test_bse_identity.py`,
 `test_ashare_identity_integration.py`, `test_ashare_news_identity.py`, alongside
 all existing CLI execution, state/report, storage and checkpoint tests.
 No model calls, portfolio/trading analysis, paid APIs, deployment, or changes to

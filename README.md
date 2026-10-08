@@ -251,7 +251,7 @@ TradingAgents works with any market Yahoo Finance covers, using the exchange-suf
 - US: `AAPL`, `SPY`
 - Hong Kong: `0700.HK` · Tokyo: `7203.T` · London: `AZN.L`
 - India: `RELIANCE.NS`, `.BO` · Canada: `.TO` · Australia: `.AX`
-- China A-shares: Shanghai `.SS`, Shenzhen `.SZ` (e.g. `600519.SS` for Kweichow Moutai)
+- China A-shares: Shanghai `.SS`, Shenzhen `.SZ`, Beijing `.BJ` (e.g. `600519.SS`, `920819.BJ`; identity support does not guarantee price-vendor coverage)
 - Crypto: `BTC-USD`, `ETH-USD`
 
 The mainland identity adapter also accepts bare six-digit **stock** codes in both
@@ -260,8 +260,11 @@ SSE listing and carries **中国能建**, **中国能源建设股份有限公司
 English name into context and reports. Bare `000001` selects the A-equity universe
 (Ping An Bank `.SZ`); explicit `000001.SS` remains the Shanghai index. Names are
 current source labels, not historical evidence. SZSE English is optional and
-provider-labelled; BSE identity is unsupported. This does not guarantee official
-announcement or overseas-news coverage. See the [adapter source, configuration,
+provider-labelled. Current BSE codes such as `920819` resolve to `.BJ` only after
+exact Eastmoney code/market/equity verification; all BSE names are provider
+labels. Legacy BSE codes are not automatically converted, and current identity
+does not establish historical ticker or price availability. This does not
+guarantee official announcement or overseas-news coverage. See the [adapter source, configuration,
 coverage and upstream-sync guide](docs/ashare-identity-adapter.md).
 
 <p align="center">

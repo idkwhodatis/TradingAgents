@@ -30,6 +30,8 @@ def official(monkeypatch):
         calls.append((url, deepcopy(params), referer, timeout))
         if url == adapter.SSE_URL:
             return deepcopy(sse if params["COMPANY_CODE"] == "600519" else {"result": []})
+        if url == adapter.BSE_URL:
+            return {"jbzl": []}
         if url == adapter.YAHOO_SEARCH_URL:
             return {"quotes": []}
         assert url == adapter.SZSE_URL
@@ -108,8 +110,8 @@ def test_sh_alias_resolves_same_snapshot(official):
 
 
 @pytest.mark.parametrize("symbol", ["920001.BJ", "830799.BJ"])
-def test_bse_is_explicit_unknown_without_unverified_requests(symbol, monkeypatch):
-    monkeypatch.setattr(adapter, "_get_json", lambda *a, **k: pytest.fail("BSE not supported"))
+def test_bse_without_current_provider_metadata_is_explicit_unknown(symbol, monkeypatch):
+    monkeypatch.setattr(adapter, "_get_json", lambda *a, **k: {"jbzl": []})
     output, config = adapter.prepare_instrument(symbol, "stock", {})
     assert output == symbol
     assert config["_ashare_identity"]["status"] == "unavailable"
