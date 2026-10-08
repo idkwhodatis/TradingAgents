@@ -3,7 +3,9 @@
 The existing primary news vendor chain still runs first. The shared `get_news`
 and `get_global_news` tools now have a separately configurable DuckDuckGo search
 fallback. This serves news and sentiment analysts through the same tool in the
-TUI, headless CLI and Python graph API. No extra package or paid API key is needed.
+TUI, headless CLI and Python graph API. No paid API key is needed. Company website
+validation uses pinned tldextract 5.4.0’s bundled offline Public Suffix List
+(no runtime PSL downloads). Updating that dependency deliberately updates the snapshot.
 
 ## Behavior
 
@@ -15,7 +17,7 @@ TUI, headless CLI and Python graph API. No extra package or paid API key is need
   prioritizing one query in each language. Other instruments use canonical
   ticker symbols or explicit descriptions for known commodities, indices,
   crypto and FX pairs. No company name is translated or guessed.
-- The adapter calls only DuckDuckGo's public search/news endpoints, not a DDGS
+- Search discovery calls only DuckDuckGo's public search/news endpoints, not a DDGS
   mixed-engine `auto` backend. DuckDuckGo itself may syndicate other providers.
   This is an unofficial public search interface, so schema changes and access
   restrictions may make it unavailable.
@@ -34,6 +36,60 @@ TUI, headless CLI and Python graph API. No extra package or paid API key is need
 - URLs are normalized and deduplicated; syndication/title duplicates are limited.
   A media article is not an official issuer statement. English text alone does
   not establish an independent overseas perspective.
+
+## Per-company official website trust
+
+When a company-news fallback is needed, a separate metadata adapter can verify
+an issuer website from an exact exchange/regulator company profile. This never
+adds the domain to the global publisher allowlist. Its bundle binds the exact
+canonical instrument and provider identity to an exact hostname and path prefix,
+with source provenance, `verified_at` and `expires_at` in UTC. Search-only domains,
+provider-supplied publisher labels and Eastmoney profiles cannot establish this
+trust. Unsupported markets and empty/invalid website fields remain explicitly
+unavailable, while ordinary publisher news continues normally.
+
+- Matching is exact-host only: no inferred apex, `www`, sibling or subdomain
+  trust. Shared-hosting paths must remain inside the verified tenant path.
+  Public/private suffix roots, blocked UGC platforms, credentials, IP addresses,
+  localhost and non-web URLs remain excluded.
+- Issuer excerpts are labelled `issuer_self_published`, with their website
+  verification provenance and `independently_verified: false`. They remain
+  search snippets; date, relevance, deduplication and result limits still apply.
+- The metadata cache is bounded and company-specific. TTL is checked on use;
+  expiration triggers an on-demand refresh during subsequent analysis, never a
+  cron task. Refresh errors and changed issuer identities do not reuse stale
+  scopes. News cache keys include the active company scope and verification
+  period, preventing cross-company or expired-domain cache reuse.
+- Only fixed exchange/regulator endpoints are fetched. Discovered issuer URLs
+  are never visited, so their redirects cannot grant additional trust. A new
+  host/path must appear in fresh official metadata before it is admitted.
+- Current metadata does not establish historical domain ownership. Archived
+  reports retain their dated provenance; they do not become a reusable allowlist.
+  The pinned A-share identity remains immutable across frontends/checkpoints.
+
+Current adapter coverage is deliberately narrow:
+
+- SZSE A-shares: the exchange’s company-detail JSON explicitly identifies the
+  A-share code, full/short names and company website. A changed name must agree
+  with the run’s pinned identity before a website is trusted.
+- US SEC operating-company filers: the SEC ticker map must identify one CIK,
+  and the submissions document must repeat that exact CIK and ticker on a
+  supported exchange. `website` and `investorWebsite` are used only when present
+  and safe. Many real SEC profiles leave both blank; this is unavailable
+  coverage, not a reason to infer a domain. Requests honor the existing
+  `SEC_EDGAR_USER_AGENT` identification setting.
+- SSE (including 601868), BSE, HKEX and other markets: no supported structured
+  official website field is currently available to this adapter. No website
+  trust is inferred from names, email addresses or search results. Existing
+  publisher news and exchange/regulator disclosure screening remain available.
+
+Set `company_website_enabled=False` (or
+`TRADINGAGENTS_COMPANY_WEBSITE_ENABLED=false`) to disable this extra trust.
+`company_website_timeout` defaults to 5 seconds and `company_website_cache_ttl`
+to 86400 seconds. TTL zero disables cache storage and reuse, while a freshly
+verified scope has a 120-second consumption lease for the current retrieval.
+Metadata work shares the fallback’s bounded deadline.
+The primary vendor path and global-news requests do not perform these lookups.
 
 ## Official A-share discovery
 

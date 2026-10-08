@@ -33,6 +33,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_ASHARE_IDENTITY_CACHE_TTL": "ashare_identity_cache_ttl",
     "TRADINGAGENTS_DUCKDUCKGO_NEWS_ENABLED": "duckduckgo_news_enabled",
     "TRADINGAGENTS_ASHARE_ANNOUNCEMENTS_ENABLED": "ashare_announcements_enabled",
+    "TRADINGAGENTS_COMPANY_WEBSITE_ENABLED": "company_website_enabled",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
@@ -188,6 +189,11 @@ def build_default_config() -> dict:
         "duckduckgo_news_cache_ttl": 300,
         "duckduckgo_news_region": "auto",
         "duckduckgo_news_allowed_domains": [],
+        # Issuer-scoped trust from exact exchange/regulator profiles, never a
+        # global publisher allowlist. Refreshed on demand, not on a schedule.
+        "company_website_enabled": True,
+        "company_website_timeout": 5.0,
+        "company_website_cache_ttl": 86400,
         # Data vendor configuration
         # Category-level configuration (default for all tools in category).
         # The configured value is the exact vendor chain — requests are NOT silently

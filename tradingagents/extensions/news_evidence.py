@@ -152,6 +152,13 @@ def retrieve_news(primary, ticker: str | None, start_date: str, end_date: str, *
         else:
             queries, aliases = config.get("global_news_queries", ["global financial markets"]), []
         settings = {key: value for key, value in config.items() if key.startswith("duckduckgo_news_")}
+        if ticker:
+            from tradingagents.extensions.company_website import resolve_company_website
+            website = resolve_company_website(ticker, config)
+            settings["_company_website"] = website
+            settings["_company_website_ticker"] = normalize_symbol(ticker)
+        else:
+            website = None
         settings["duckduckgo_news_aliases"] = aliases
         settings["_duckduckgo_news_deadline"] = config["_duckduckgo_news_deadline"]
         settings["duckduckgo_news_max_queries"] = news_budget
@@ -159,6 +166,8 @@ def retrieve_news(primary, ticker: str | None, start_date: str, end_date: str, *
             settings["duckduckgo_news_max_results"] = min(
                 int(limit), int(config.get("duckduckgo_news_max_results", 10)))
         bundle = fetch_news(queries, start_date, end_date, settings)
+        if website is not None:
+            bundle["company_website"] = website
         bundle["primary_status"] = "error" if error is not None else "no_usable_evidence"
         search_stopped = bool(bundle.get("diagnostics", {}).get("stop_search"))
         additions.append(_render(bundle, "Source-screened DuckDuckGo news fallback"))

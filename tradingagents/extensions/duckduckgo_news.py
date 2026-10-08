@@ -115,7 +115,7 @@ BLOCKED_DOMAINS = frozenset(
 _CACHE: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 _CACHE_LOCK = RLock()
 _CACHE_LIMIT = 128
-_VERSION = 2
+_VERSION = 3
 _BLOCK_UNTIL = 0.0
 _BLOCK_REASON = ""
 _BLOCK_SECONDS = 60.0
@@ -282,7 +282,7 @@ def _settings(config):
     return settings
 
 
-def _public_url(value, extra_domains):
+def _public_url(value, extra_domains, *, company_website=None, company_ticker=None, now=None):
     """Screen public article URLs without DNS requests or fetching their contents."""
     if not isinstance(value, str) or len(value) > 4096 or re.search(r"[\s\\\x00-\x1f\x7f]", value):
         return None
@@ -303,7 +303,10 @@ def _public_url(value, extra_domains):
             return None
         if _matches_domain(host, BLOCKED_DOMAINS):
             return None
-        if _matches_domain(host, DISCLOSURE_DOMAINS):
+        from tradingagents.extensions.company_website import matches_company_website
+        if matches_company_website(value, company_website, company_ticker, now=now):
+            category = "issuer_self_published"
+        elif _matches_domain(host, DISCLOSURE_DOMAINS):
             category = "exchange_regulator_disclosure"
         elif _matches_domain(host, NEWS_DOMAINS):
             category = "established_news"
@@ -326,6 +329,16 @@ def _public_url(value, extra_domains):
         return url, host, category
     except (ValueError, UnicodeError):
         return None
+
+
+def _issuer_metadata(bundle):
+    return {
+        "issuer_website_verification": {
+            key: deepcopy(bundle.get(key))
+            for key in ("company_key", "source", "verified_at", "expires_at")
+        },
+        "independently_verified": False,
+    }
 
 
 def _published(value):
@@ -593,8 +606,14 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
         result["status"] = "empty"
         diagnostics["reason"] = "requested_window_is_in_the_future"
         return result
+    from tradingagents.extensions.company_website import company_website_cache_key
+    company_website = config.get("_company_website")
+    company_ticker = config.get("_company_website_ticker")
+    website_key = company_website_cache_key(company_website, company_ticker, now=now)
+    if website_key is None:
+        company_website = None
     cache_settings = tuple((k, v) for k, v in settings.items() if k != "total_timeout")
-    key = (_VERSION, tuple(normalized), start.isoformat(), end.isoformat(), cache_settings)
+    key = (_VERSION, tuple(normalized), start.isoformat(), end.isoformat(), cache_settings, website_key)
     ttl = settings["cache_ttl"]
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
@@ -659,7 +678,11 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
                     reason = "malformed"
                 else:
                     published = _published(row.get("date"))
-                    source = _public_url(row.get("url"), settings["allowed_domains"])
+                    source = _public_url(
+                        row.get("url"), settings["allowed_domains"],
+                        company_website=company_website, company_ticker=company_ticker,
+                        now=_utcnow(),
+                    )
                     title = _clean(row.get("title"), 500)
                     content = _clean(row.get("excerpt", row.get("body")), 2000)
                     matched = _relevance(title, content, settings["aliases"])
@@ -711,6 +734,8 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
                                     "source_domain": host,
                                     "source_category": category,
                                     "published_at": published[0].isoformat(),
+                                    **(_issuer_metadata(company_website)
+                                       if category == "issuer_self_published" else {}),
                                 }
                             )
                     continue
@@ -738,6 +763,8 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
                     "matched_aliases": matched,
                     "retrieved_at": now.isoformat(),
                 }
+                if category == "issuer_self_published":
+                    evidence.update(_issuer_metadata(company_website))
                 by_url[url] = evidence
                 by_copy[fingerprint] = evidence
                 outcome["accepted"] += 1
