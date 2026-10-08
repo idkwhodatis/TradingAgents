@@ -15,6 +15,7 @@ import typer
 from rich.console import Console
 from rich.live import Live
 
+from cli import execution
 from cli.display import (
     ANALYST_ORDER,
     AnalystWallTimeTracker,
@@ -243,37 +244,23 @@ def _execute_analysis(selections, config, portfolio, mode, graph_factory, run_st
                     for spec in plan.specs:
                         message_buffer.update_agent_status(spec.agent_node, "in_progress")
                         tracker.mark_started(spec.key)
-                    try:
-                        init_state = graph.create_run_state(ticker, trade_date, selections["asset_type"], portfolio)
-                        checkpoint_tid = graph.begin_checkpoint(ticker, trade_date, selections["asset_type"], portfolio)
-                        if checkpoint_tid is not None:
-                            _announce_checkpoint_state(graph, ticker, trade_date)
-                        args = graph.propagator.get_graph_args(callbacks=[stats])
-                        if checkpoint_tid is not None:
-                            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = checkpoint_tid
-                        final_state = None
-                        seen_without_ids = set()
-                        for messages, chunk in graph.stream_run(graph.checkpoint_input(init_state), **args):
-                            with lock:
-                                _consume_messages(messages, seen_without_ids)
-                                if chunk is not None:
-                                    _consume_reports(chunk, tracker)
-                            if chunk is None:
-                                continue
-                            if chunk.get("__interrupt__"):
-                                raise RuntimeError("Analysis paused at an interrupt; checkpoint retained")
-                            # stream_run includes analyst report deltas as well as
-                            # top-level values; keep one merged state, not a trace.
-                            if final_state is None:
-                                final_state = {}
-                            final_state.update(chunk)
-                        if final_state is None:
-                            raise RuntimeError("Analysis produced no state; checkpoint retained")
-                        # One shared completion path: JSON state, memory, checkpoint.
-                        graph.record_decision(ticker, trade_date, final_state)
-                        graph.clear_checkpoint_on_success(ticker, trade_date, selections["asset_type"], portfolio)
-                    finally:
-                        graph.end_checkpoint()
+                    seen_without_ids = set()
+
+                    def consume(messages, chunk):
+                        with lock:
+                            _consume_messages(messages, seen_without_ids)
+                            if chunk is not None:
+                                _consume_reports(chunk, tracker)
+
+                    final_state = execution.execute_graph(
+                        execution.AnalysisRequest(ticker, trade_date, selections["asset_type"], portfolio),
+                        graph,
+                        callbacks=[stats],
+                        observer=execution.AnalysisObserver(
+                            on_chunk=consume,
+                            on_checkpoint=lambda: _announce_checkpoint_state(graph, ticker, trade_date),
+                        ),
+                    )
                     with lock:
                         for agent in message_buffer.agent_status:
                             message_buffer.update_agent_status(agent, "completed")
