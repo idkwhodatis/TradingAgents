@@ -43,7 +43,9 @@ def _native_errors(function):
             code = exc.winerror
             if code in (2, 3):
                 raise FileNotFoundError(errno.ENOENT, "pause file missing") from None
-            raise OSError(errno.EIO, "Windows pause store unavailable") from None
+            raise OSError(
+                errno.EIO, f"Windows pause store unavailable ({function.__name__}, winerror={code})"
+            ) from exc
     return wrapped
 
 
