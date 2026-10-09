@@ -325,6 +325,9 @@ def test_reader_waits_until_renamed_writer_handle_is_closed(store, monkeypatch):
     original_set = win32file.SetFileInformationByHandle
 
     def held_rename(handle, information_class, information):
+        if information_class == win32file.FileRenameInfo:
+            assert information["RootDirectory"] is None
+            assert os.path.normcase(information["FileName"]) == os.path.normcase(str(store))
         result = original_set(handle, information_class, information)
         if information_class == win32file.FileRenameInfo:
             renamed.set()

@@ -145,7 +145,7 @@ def directory(path, create=False):
             if part is not None:
                 current = ntpath.join(current, part)
             try:
-                handle = _open_directory(current, writable=create and index == len(parts))
+                handle = _open_directory(current)
             except pywintypes.error as exc:
                 if exc.winerror not in (2, 3) or part is None:
                     raise
@@ -157,7 +157,7 @@ def directory(path, create=False):
                 except pywintypes.error as exists:
                     if exists.winerror != 183:
                         raise
-                handle = _open_directory(current, writable=create and index == len(parts))
+                handle = _open_directory(current)
             result.handles.append(handle)
             info = win32file.GetFileInformationByHandle(handle)
             if (not info[0] & win32con.FILE_ATTRIBUTE_DIRECTORY
@@ -173,10 +173,8 @@ def directory(path, create=False):
         raise
 
 
-def _open_directory(path, writable=False):
-    access = win32con.READ_CONTROL | ntsecuritycon.FILE_READ_ATTRIBUTES
-    if writable:
-        access |= ntsecuritycon.FILE_ADD_FILE
+def _open_directory(path):
+    access = win32con.READ_CONTROL | ntsecuritycon.FILE_READ_ATTRIBUTES | ntsecuritycon.FILE_TRAVERSE
     return win32file.CreateFile(
         path, access,
         win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE, None,
@@ -364,10 +362,12 @@ def _write_state_locked(directory, raw):
         if write_at(temporary, raw, 0) != len(raw):
             raise OSError("incomplete pause state write")
         flush(temporary)
-        # Rename the verified open object, never reopen its temporary pathname.
+        # Rename the verified source handle using the documented absolute-target
+        # form. Every destination ancestor stays pinned and reparse-checked, so
+        # using its full name cannot redirect the replacement.
         win32file.SetFileInformationByHandle(handle, win32file.FileRenameInfo, {
-            'ReplaceIfExists': True, 'RootDirectory': directory.handles[-1],
-            'FileName': 'ddg-block.json'})
+            'ReplaceIfExists': True, 'RootDirectory': None,
+            'FileName': ntpath.join(directory.path, 'ddg-block.json')})
         renamed = True
         flush(temporary)
     finally:
