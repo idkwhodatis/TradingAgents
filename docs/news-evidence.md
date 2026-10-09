@@ -229,11 +229,18 @@ cached evidence may still be returned without HTTP. Expiry only permits the next
 user-triggered call; it does not start a probe, retry, background job or request,
 and does not mean DuckDuckGo has unblocked the connection. There is no force flag.
 The pause is local to this user/cache home, not an IP-wide lock across machines.
-Secure locking requires POSIX directory-descriptor and flock support (including
-Linux/Pi and macOS); unsupported platforms fail closed rather than use an
-unlocked fallback, with the explicit `pause_state_unsupported_platform` status.
-Windows DDG search is therefore unavailable with this implementation; primary
-news/data vendors are unaffected.
+Linux/Pi and macOS use directory-descriptor operations and `flock`. Windows
+uses the Windows-only `pywin32` dependency for native ACLs, handle-based checks
+and byte-range locks. A separate short metadata lock coordinates JSON reads
+and replacement, so status reads do not wait for an HTTP request and an open
+reader does not interfere with native replacement. New Windows objects have a protected DACL granting access
+only to the current user; `chmod` is not treated as a Windows privacy check.
+The store rejects reparse points/junctions, hard-linked files, unsafe existing
+permissions, UNC/device paths and filesystems without persistent ACLs. Checked
+ancestors remain open against rename while their paths are used. Other supported
+callers still share the same JSON schema and pause semantics. Missing native
+support fails closed with `pause_state_unsupported_platform`, without falling
+back to process memory. Primary news/data vendors are unaffected.
 
 Inspect the pause without contacting any provider:
 
@@ -257,6 +264,14 @@ their existing budget and recheck the pause after acquiring the gate. Ordinary
 handled network errors do not leave this marker.
 An interrupted/failed-write marker requires inspection rather than automatic
 expiry or repair; restarting alone does not bypass it. No state is automatically
-deleted to recover. These protections require a local filesystem supporting
-atomic replace, fsync and flock; a shared network filesystem is not a guaranteed
-cross-machine coordination mechanism.
+deleted to recover. These protections require a local filesystem and native locking/atomic rename.
+On Windows, file data and the request marker are flushed using native handles;
+Windows has no supported directory-handle equivalent of POSIX directory fsync,
+so first-use directory metadata power-loss durability is not guaranteed. Process
+interruption and failed state writes remain fail-closed. Shared network
+filesystems are not a guaranteed cross-machine coordination mechanism.
+
+Windows verification is an offline CI job on native Windows Python 3.12 and 3.14.
+It exercises real ACLs, junction rejection, atomic replacement and subprocess
+locks, with HTTP mocked. Linux fixture tests alone do not establish Windows
+runtime compatibility.

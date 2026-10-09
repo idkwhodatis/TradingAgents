@@ -1,0 +1,41 @@
+name: Windows DDG pause validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['fix/ddg-persistent-pause']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ddg-pause-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-pause:
+    name: offline Windows pause (py${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Run native Windows ACL, locking and offline provider tests
+        # conftest and process helpers prohibit network access during tests.
+        run: >-
+          python -m pytest -q
+          tests/test_ddg_pause_windows.py
+          tests/test_ddg_pause_integration.py
+          tests/test_duckduckgo_news.py
+          tests/test_news_evidence_extension.py
+          tests/test_env_overrides.py
+

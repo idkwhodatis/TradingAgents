@@ -227,22 +227,20 @@ def test_fail_closed_pause_is_visible_in_retrieve_news(monkeypatch, tmp_path):
 def test_cross_process_gate_wait_respects_request_budget(tmp_path, monkeypatch):
     cache = tmp_path / "locked-cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    code = '''
+    locked = tmp_path / "budget-gate-locked"
+    code = f'''
+from pathlib import Path
 from tradingagents.extensions.ddg_pause import request_guard
 with request_guard():
-    print("locked", flush=True)
+    Path({str(locked)!r}).write_text("locked")
     input()
 '''
     holder = subprocess.Popen([sys.executable, "-u", "-c", OFFLINE + code],
         cwd=ROOT, env=child_env(cache), stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        # Bound startup too, so a broken child cannot hang an offline suite.
-        import selectors
-        with selectors.DefaultSelector() as ready:
-            ready.register(holder.stdout, selectors.EVENT_READ)
-            assert ready.select(timeout=20), "lock holder did not start"
-        assert holder.stdout.readline().strip() == "locked"
+        # File handshakes work on Windows, where selectors cannot watch pipes.
+        wait_for_file(locked, holder)
         def no_http(*args, **kwargs):
             pytest.fail("A waiting gate must not start HTTP")
         monkeypatch.setattr(requests.Session, "request", no_http)
@@ -389,7 +387,10 @@ def blocked_http(self, url, **kwargs):
 def replace_failure(*args, **kwargs):
     raise OSError("simulated atomic replace failure")
 requests.Session.get = blocked_http
-ddg_pause.os.replace = replace_failure
+if ddg_pause._WINDOWS:
+    ddg_pause._windows.write_state = replace_failure
+else:
+    ddg_pause.os.replace = replace_failure
 result = fetch_news(["failed write"], "2026-10-01", "2026-10-08", {
     "duckduckgo_news_cache_ttl": 0,
 })

@@ -9,6 +9,8 @@ import pytest
 
 from tradingagents.extensions import ddg_pause as pause
 
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX storage checks; native Windows security is tested separately")
+
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):

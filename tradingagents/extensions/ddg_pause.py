@@ -1,4 +1,4 @@
-"""Private, persistent DuckDuckGo circuit breaker (standard library only).
+"""Private, persistent DuckDuckGo circuit breaker with native platform security.
 
 An unreadable or unsafe state is a closed circuit, never permission to retry.
 The request guard serializes the *whole* request and block recording across
@@ -20,6 +20,15 @@ try:
     import fcntl
 except ImportError:  # No unlocked fallback on platforms without flock.
     fcntl = None
+
+_WINDOWS = os.name == "nt"
+if _WINDOWS:
+    try:
+        from tradingagents.extensions import ddg_pause_windows as _windows
+    except ImportError:
+        _windows = None
+else:
+    _windows = None
 
 _MAX_BYTES = 4096
 _MAX_SECONDS = 168 * 3600
@@ -67,6 +76,10 @@ def _root():
 
 def _directory(create=False):
     """Walk using directory FDs so symlinks cannot redirect the store."""
+    if _WINDOWS:
+        if _windows is None:
+            raise PauseError("pause_state_unsupported_platform")
+        return _windows.directory(_root(), create=create)
     if fcntl is None or not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "getuid", "pread", "pwrite", "ftruncate", "fsync")):
         raise PauseError("pause_state_unsupported_platform")
     path = _root()
@@ -102,11 +115,35 @@ def _directory(create=False):
 
 
 def _check_file(fd):
+    if _WINDOWS:
+        return _windows.check_file(fd)
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
         raise PauseError()
     return info
+
+
+def _close(fd, *, directory=False):
+    if _WINDOWS:
+        (_windows.close_directory if directory else _windows.close_file)(fd)
+    else:
+        os.close(fd)
+
+
+def _open_file(directory, name, *, lock=False):
+    if _WINDOWS:
+        return _windows.open_file(directory, name, "lock" if lock else "read")
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK
+    flags |= os.O_CREAT | os.O_RDWR if lock else os.O_RDONLY
+    return os.open(name, flags, 0o600, dir_fd=directory)
+
+
+def _lock_file(fd, *, shared=False):
+    if _WINDOWS:
+        (_windows.lock_shared if shared else _windows.lock_exclusive)(fd)
+    else:
+        fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
 
 
 def _no_duplicates(pairs):
@@ -119,18 +156,26 @@ def _no_duplicates(pairs):
 
 
 def _read(fd):
-    try:
-        state_fd = os.open("ddg-block.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-    except FileNotFoundError:
-        return None
-    try:
-        if _check_file(state_fd).st_size > _MAX_BYTES:
-            raise PauseError()
-        raw = os.read(state_fd, _MAX_BYTES + 1)
+    if _WINDOWS:
+        try:
+            raw = _windows.read_state(fd, _MAX_BYTES + 1)
+        except FileNotFoundError:
+            return None
         if len(raw) > _MAX_BYTES:
             raise PauseError()
-    finally:
-        os.close(state_fd)
+    else:
+        try:
+            state_fd = _open_file(fd, "ddg-block.json")
+        except FileNotFoundError:
+            return None
+        try:
+            if _check_file(state_fd).st_size > _MAX_BYTES:
+                raise PauseError()
+            raw = os.read(state_fd, _MAX_BYTES + 1)
+            if len(raw) > _MAX_BYTES:
+                raise PauseError()
+        finally:
+            _close(state_fd)
     data = json.loads(raw, object_pairs_hook=_no_duplicates)
     if (not isinstance(data, dict) or set(data) != _FIELDS
             or type(data["version"]) is not int or data["version"] != 1
@@ -173,7 +218,7 @@ def status():
         return {"reason": "pause_state_unavailable", "retry_after_seconds": None, "source": "persistent"}
     finally:
         if fd is not None:
-            os.close(fd)
+            _close(fd, directory=True)
 
 
 def _remaining(deadline):
@@ -201,18 +246,18 @@ def request_guard(deadline=None):
     nested = getattr(_LOCAL, "depth", 0) > 0
     try:
         if not nested:
-            if fcntl is None:
+            if not _WINDOWS and fcntl is None:
                 raise PauseError("pause_state_unsupported_platform")
             try:
                 fd = _directory(create=True)
-                lock_fd = os.open("ddg-block.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
-                                  0o600, dir_fd=fd)
+                lock_fd = _open_file(fd, "ddg-block.lock", lock=True)
                 _check_file(lock_fd)
-                _HELD_FDS.add(lock_fd)
+                if not _WINDOWS:
+                    _HELD_FDS.add(lock_fd)
                 while True:
                     _remaining(deadline)
                     try:
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        _lock_file(lock_fd)
                         break
                     except BlockingIOError:
                         remaining = _remaining(deadline)
@@ -232,10 +277,11 @@ def request_guard(deadline=None):
             _LOCAL.lock_fd = None
             _LOCAL.directory_fd = None
         if lock_fd is not None:
-            _HELD_FDS.discard(lock_fd)
-            os.close(lock_fd)
+            if not _WINDOWS:
+                _HELD_FDS.discard(lock_fd)
+            _close(lock_fd)
         if fd is not None:
-            os.close(fd)
+            _close(fd, directory=True)
         _LOCK.release()
 
 
@@ -257,6 +303,9 @@ def _record_impl(reason, hours=6):
                 return active
             data = {"version": 1, "provider": "duckduckgo", "blocked_at": now,
                     "blocked_until": until, "reason": sanitized_reason}
+            if _WINDOWS:
+                _windows.write_state(fd, json.dumps(data, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+                return _active(data, now)
             temporary = ".ddg-block-" + uuid.uuid4().hex
             out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
             try:
@@ -277,12 +326,15 @@ def _record_impl(reason, hours=6):
         raise PauseError() from exc
     finally:
         if fd is not None:
-            os.close(fd)
+            _close(fd, directory=True)
 
 
 def _marker_value(fd):
-    _check_file(fd)
-    value = os.pread(fd, 2, 0)
+    info = _check_file(fd)
+    if (info if _WINDOWS else info.st_size) not in (0, 1):
+        raise PauseError()
+    # Windows locks byte 1; never read across that mandatory lock range.
+    value = _windows.read_at(fd, 1, 0) if _WINDOWS else os.pread(fd, 2, 0)
     if value not in {b"", b"0", b"1"}:
         raise PauseError()
     return value
@@ -290,7 +342,7 @@ def _marker_value(fd):
 
 def _check_marker(directory_fd):
     try:
-        fd = os.open("ddg-block.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        fd = _open_file(directory_fd, "ddg-block.lock")
     except FileNotFoundError:
         return
     try:
@@ -299,7 +351,7 @@ def _check_marker(directory_fd):
             if getattr(_LOCAL, "depth", 0):
                 raise PauseError()
             try:
-                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                _lock_file(fd, shared=True)
             except BlockingIOError:
                 # An active request owns the exclusive gate. Let callers queue
                 # within their budget and recheck after acquiring that gate.
@@ -307,13 +359,19 @@ def _check_marker(directory_fd):
             if _marker_value(fd) == b"1":
                 raise PauseError()
     finally:
-        os.close(fd)
+        _close(fd)
 
 
 def _write_marker(value):
     fd = getattr(_LOCAL, "lock_fd", None)
     if fd is None:
         raise PauseError()
+    if _WINDOWS:
+        if _windows.write_at(fd, value, 0) != 1:
+            raise PauseError()
+        _windows.truncate(fd, 1)
+        _windows.flush(fd)
+        return
     if os.pwrite(fd, value, 0) != 1:
         raise PauseError()
     os.ftruncate(fd, 1)
