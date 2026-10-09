@@ -802,16 +802,17 @@ def test_all_market_tool_wrapper_reaches_real_adapter_http_and_filters(
 def test_block_cooldown_prevents_new_tool_calls_without_challenge_retry(monkeypatch):
     ticks = [100.0]
     monkeypatch.setattr(ddg.time, "monotonic", lambda: ticks[0])
+    monkeypatch.setattr(ddg.ddg_pause.time, "time", lambda: ticks[0] + 1000000)
     calls = wire(monkeypatch, [Response("Forbidden", 403)])
     first = ddg.fetch_news(["company"], START, END, {})
     second = ddg.fetch_news(["different company"], START, END, {})
     assert first["diagnostics"]["stop_reason"] == "http_403_blocked"
     assert second["diagnostics"]["reason"] == "provider_cooldown"
-    assert second["diagnostics"]["retry_after_seconds"] == 60
+    assert second["diagnostics"]["retry_after_seconds"] == 6 * 3600
     assert second["diagnostics"]["stop_search"] is True
     assert second["status"] == "unavailable"
     assert len(calls) == 1
-    ticks[0] = 161.0
+    ticks[0] += 6 * 3600 + 1
     assert ddg.block_status() is None
 
 
@@ -1127,4 +1128,7 @@ def test_provider_block_is_recorded_before_request_gate_opens(monkeypatch):
     monkeypatch.setattr(ddg, "_REQUEST_LOCK", ObservedGate())
     wire(monkeypatch, [Response("Accepted", 202)])
     ddg.fetch_news(["company"], START, END, {})
-    assert observed == [{"reason": "http_202_blocked", "retry_after_seconds": 60}]
+    assert len(observed) == 1
+    assert observed[0]["reason"] == "http_202_blocked"
+    assert observed[0]["retry_after_seconds"] == 6 * 3600
+    assert observed[0]["source"] == "persistent"

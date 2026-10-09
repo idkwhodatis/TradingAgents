@@ -133,3 +133,13 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
     yield
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
+
+
+@pytest.fixture(autouse=True)
+def _own_ddg_pause(tmp_path, monkeypatch):
+    """Never read or modify the user's provider pause, or leak it between tests."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    from tradingagents.extensions import duckduckgo_news
+    monkeypatch.setattr(duckduckgo_news, "_BLOCK_ERROR", None)
+    monkeypatch.setattr(duckduckgo_news, "_BLOCK_UNTIL", 0.0)
+    monkeypatch.setattr(duckduckgo_news, "_BLOCK_REASON", "")

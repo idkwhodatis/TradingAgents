@@ -124,6 +124,7 @@ def fetch_announcements(identity: dict, start_date: str, end_date: str, config: 
             )
             session._duckduckgo_news_transport = transport
             session._duckduckgo_news_min_interval = settings["min_interval"]
+            session._duckduckgo_news_pause_hours = settings["pause_hours"]
             body = _read_response(session, SEARCH_URL, {"q": query, "kl": "cn-zh"}, settings["timeout"])
         parser = _Results()
         parser.feed(body)
@@ -161,8 +162,11 @@ def fetch_announcements(identity: dict, start_date: str, end_date: str, config: 
                                  "coverage": "One search sample, not a complete issuer filing history"}
     except _SearchFailure as exc:
         if exc.stop and exc.reason != "budget_exhausted" and not exc.block_recorded:
-            record_block(exc.reason)
+            record_block(exc.reason, settings["pause_hours"])
         result["diagnostics"] = {"reason": exc.reason, "stop_search": exc.stop}
+        pause = getattr(exc, "pause_status", None) or block_status()
+        if pause:
+            result["diagnostics"]["pause"] = pause
     except requests.RequestException:
         result["diagnostics"] = {"reason": "transport_unavailable"}
     result["diagnostics"]["transport"] = transport

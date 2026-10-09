@@ -124,6 +124,7 @@ Defaults in `DEFAULT_CONFIG`:
     "duckduckgo_news_enabled": True,
     "ashare_announcements_enabled": True,
     "duckduckgo_news_min_interval": 3.0, # seconds between DDG request starts; 0..30
+    "duckduckgo_news_pause_hours": 6.0,  # persistent pause after block; 1..168
     "duckduckgo_news_timeout": 15.0,      # seconds per bounded request
     "duckduckgo_news_total_timeout": 45,  # shared official + news search budget
     "duckduckgo_news_max_queries": 2,    # shared per call; 1..8
@@ -148,7 +149,7 @@ Set `TRADINGAGENTS_DUCKDUCKGO_NEWS_ENABLED=false` and
 `TRADINGAGENTS_ASHARE_ANNOUNCEMENTS_ENABLED=false` to restore the primary-only
 path in both CLI modes. All the search settings above also support environment
 overrides: `TRADINGAGENTS_DUCKDUCKGO_NEWS_MAX_QUERIES`, `_MAX_RESULTS`, `_TIMEOUT`,
-`_TOTAL_TIMEOUT`, `_MIN_INTERVAL`, `_CACHE_TTL`, `_REGION`, and `_ALLOWED_DOMAINS`
+`_TOTAL_TIMEOUT`, `_MIN_INTERVAL`, `_PAUSE_HOURS`, `_CACHE_TTL`, `_REGION`, and `_ALLOWED_DOMAINS`
 (each shorthand uses the same `TRADINGAGENTS_DUCKDUCKGO_NEWS` prefix).
 Allowed domains use a comma-separated list of plain ASCII hostnames, for example
 `reuters.com,apnews.com`, without schemes, paths, wildcards or empty entries.
@@ -170,7 +171,7 @@ two requests; `MAX_QUERIES` counts queries, not HTTP requests. Waiting consumes
 the shared search budget, and no wait is added after the last request. When the
 next permitted start cannot fit within the budget, the search stops. Provider
 blocks/challenges stop the remaining work without automatic retries; an active
-cooldown also stops without waiting. Lower query counts and pacing reduce request
+pause also stops without waiting. Lower query counts and pacing reduce request
 bursts but cannot guarantee that DuckDuckGo will admit requests. No live-service
 success should be inferred from deterministic offline tests.
 No primary price/fundamental vendor, signal logic or trade execution is changed.
@@ -201,3 +202,61 @@ The deadline uses monotonic checks, bounded socket timeouts and streaming-body
 checks with read-time headroom. It is not an OS-level hard kill: unusual DNS or
 HTTP-header stalls can exceed what Requests can interrupt. No background request
 thread is left running when the helper returns.
+
+
+### Persistent DuckDuckGo pause
+
+A challenge, HTTP 202/401/403/429, or redirect immediately stops DuckDuckGo
+requests and records a **6-hour local pause**. Configure
+`duckduckgo_news_pause_hours` or `TRADINGAGENTS_DUCKDUCKGO_NEWS_PAUSE_HOURS`
+with a finite value from **1 through 168 hours**. Six hours is a conservative
+local default, not a server-provided retry time or a guarantee of admission.
+A shorter setting in another process cannot shorten an existing pause.
+
+News analysis, official-announcement search and the standalone diagnostic share
+`$XDG_CACHE_HOME/tradingagents/ddg-block.json`, or
+`~/.cache/tradingagents/ddg-block.json` when XDG_CACHE_HOME is unset. Use the same
+OS user and cache home for processes that must share it. The state contains only
+schema/provider markers, block time, expiry and a sanitized reason: no query,
+response, credential, token or company data. The directory is owner-only and
+state writes are atomic with owner-only permissions. A file lock serializes
+requests and updates across processes, preventing a waiting process from making
+an HTTP request after another process records a block. Existing in-process
+pacing and the shared request budget still apply; lock waiting spends that budget.
+
+While paused, subsequent DuckDuckGo calls make no HTTP requests. Previously
+cached evidence may still be returned without HTTP. Expiry only permits the next
+user-triggered call; it does not start a probe, retry, background job or request,
+and does not mean DuckDuckGo has unblocked the connection. There is no force flag.
+The pause is local to this user/cache home, not an IP-wide lock across machines.
+Secure locking requires POSIX directory-descriptor and flock support (including
+Linux/Pi and macOS); unsupported platforms fail closed rather than use an
+unlocked fallback, with the explicit `pause_state_unsupported_platform` status.
+Windows DDG search is therefore unavailable with this implementation; primary
+news/data vendors are unaffected.
+
+Inspect the pause without contacting any provider:
+
+```sh
+python -m tradingagents.extensions.news_diagnostics --status
+```
+
+Both search results and reports expose the pause reason and expiry in diagnostic
+metadata. Corrupt, unreadable, oversized or unsafe state fails closed with
+`pause_state_unavailable`; clock rollback before the recorded block time also
+fails closed. Inspect the local clock, ownership/permissions and state file before
+running another analysis. The program does not delete or silently reset invalid
+state. Status inspection never rewrites or extends a pause.
+
+A one-byte durable marker in `ddg-block.lock` is set before each HTTP request and
+cleared after its outcome is safely handled. If a process is killed during a
+request or cannot persist a block, the marker remains and later processes fail
+closed (`pause_state_unavailable`), even when the JSON file is absent or expired.
+A live request is distinguished by its held lock; other callers wait within
+their existing budget and recheck the pause after acquiring the gate. Ordinary
+handled network errors do not leave this marker.
+An interrupted/failed-write marker requires inspection rather than automatic
+expiry or repair; restarting alone does not bypass it. No state is automatically
+deleted to recover. These protections require a local filesystem supporting
+atomic replace, fsync and flock; a shared network filesystem is not a guaranteed
+cross-machine coordination mechanism.

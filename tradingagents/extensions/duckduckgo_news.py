@@ -30,6 +30,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 from urllib3.util import Timeout
 
+from tradingagents.extensions import ddg_pause
+
 SEARCH_URL = "https://duckduckgo.com/"
 NEWS_URL = "https://duckduckgo.com/news.js"
 # Deliberately excludes open publishing platforms, aggregators, and stock forums.
@@ -118,7 +120,7 @@ _CACHE_LIMIT = 128
 _VERSION = 3
 _BLOCK_UNTIL = 0.0
 _BLOCK_REASON = ""
-_BLOCK_SECONDS = 60.0
+_BLOCK_ERROR = None
 _REQUEST_LOCK = RLock()
 _LAST_REQUEST_STARTED = None
 _MAX_RESPONSE_BYTES = 1_048_576
@@ -165,29 +167,43 @@ class _SearchFailure(Exception):
 
 
 def block_status() -> dict | None:
-    """Share a short provider-wide backoff across news and official discovery.
+    """Read provider-wide persistent pause, retaining a monotonic safety fallback.
 
-    This is a cooldown only, never permission to retry or bypass a challenge.
-    No remote body, credentials, URL, or source content is retained.
+    Expiry only permits the next explicitly requested search; it is never proof
+    of server recovery and does not schedule any network activity.
     """
+    persistent = ddg_pause.status()
     with _CACHE_LOCK:
+        if _BLOCK_ERROR:
+            return dict(_BLOCK_ERROR)
+        if persistent and persistent["retry_after_seconds"] is None:
+            return persistent
         remaining = _BLOCK_UNTIL - time.monotonic()
-        if remaining <= 0:
-            return None
-        return {"reason": _BLOCK_REASON, "retry_after_seconds": math.ceil(remaining)}
+        if remaining > 0 and (
+            persistent is None or remaining > persistent["retry_after_seconds"]
+        ):
+            return {**(persistent or {}), "reason": _BLOCK_REASON,
+                    "retry_after_seconds": math.ceil(remaining)}
+        return persistent
 
 
-def record_block(reason: str) -> None:
-    """Prevent subsequent analyst/tool calls from immediately repeating a block."""
-    global _BLOCK_UNTIL, _BLOCK_REASON
-    safe_reason = (
-        reason
-        if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_]{1,80}", reason)
-        else "provider_blocked"
-    )
+def record_block(reason: str, hours: float = 6) -> None:
+    """Persist a sanitized block without shortening an existing pause."""
+    global _BLOCK_UNTIL, _BLOCK_REASON, _BLOCK_ERROR
+    hours = _number({"pause_hours": hours}, "pause_hours", 6, 1, 168)
+    safe_reason = ddg_pause.safe_reason(reason)
     with _CACHE_LOCK:
-        _BLOCK_UNTIL = time.monotonic() + _BLOCK_SECONDS
-        _BLOCK_REASON = safe_reason
+        until = time.monotonic() + hours * 3600
+        if until > _BLOCK_UNTIL:
+            _BLOCK_UNTIL, _BLOCK_REASON = until, safe_reason
+    try:
+        ddg_pause.record(safe_reason, hours)
+    except ddg_pause.PauseError:
+        # A failed write must not permit another request in this process even if
+        # the previous file still appears readable. No remote content is kept.
+        with _CACHE_LOCK:
+            _BLOCK_ERROR = {"reason": "pause_state_unavailable",
+                            "retry_after_seconds": None, "detail": "write_failed"}
 
 
 def _utcnow():
@@ -236,6 +252,7 @@ def _settings(config):
         "timeout": _number(config, "duckduckgo_news_timeout", 15, 0.5, 15),
         "total_timeout": _number(config, "duckduckgo_news_total_timeout", 45, 5, 120),
         "min_interval": _number(config, "duckduckgo_news_min_interval", 3, 0, 30),
+        "pause_hours": _number(config, "duckduckgo_news_pause_hours", 6, 1, 168),
         "max_queries": _number(config, "duckduckgo_news_max_queries", 2, 1, 8, integer=True),
         "max_results": _number(config, "duckduckgo_news_max_results", 10, 1, 30, integer=True),
         "cache_ttl": _number(config, "duckduckgo_news_cache_ttl", 300, 0, 3600),
@@ -426,6 +443,7 @@ def _check_provider_ready(session):
     if blocked:
         failure = _SearchFailure(blocked["reason"], stop=True)
         failure.block_recorded = True
+        failure.pause_status = blocked
         raise failure
     return _remaining_budget(session)
 
@@ -444,25 +462,36 @@ def _request_slot(session):
     if not acquired:
         raise _SearchFailure("budget_exhausted", stop=True)
     try:
+        # Hold the provider's cross-process gate through response inspection and
+        # pause persistence: another process cannot slip a request past a block.
         remaining = _check_provider_ready(session)
-        interval = getattr(session, "_duckduckgo_news_min_interval", 3.0)
-        delay = (
-            max(0.0, _LAST_REQUEST_STARTED + interval - time.monotonic())
-            if _LAST_REQUEST_STARTED is not None else 0.0
-        )
-        if delay:
-            # Do not sleep to (or beyond) the deadline when no request can fit.
-            if remaining is not None and delay >= remaining:
-                raise _SearchFailure("budget_exhausted", stop=True)
-            time.sleep(delay)
-        _check_provider_ready(session)
-        try:
-            yield
-        except _SearchFailure as exc:
-            if exc.stop and exc.reason != "budget_exhausted" and not exc.block_recorded:
-                record_block(exc.reason)
-                exc.block_recorded = True
-            raise
+        guard_deadline = None if remaining is None else ddg_pause.monotonic() + remaining
+        with ddg_pause.request_guard(guard_deadline):
+            remaining = _check_provider_ready(session)
+            interval = getattr(session, "_duckduckgo_news_min_interval", 3.0)
+            delay = (
+                max(0.0, _LAST_REQUEST_STARTED + interval - time.monotonic())
+                if _LAST_REQUEST_STARTED is not None else 0.0
+            )
+            if delay:
+                if remaining is not None and delay >= remaining:
+                    raise _SearchFailure("budget_exhausted", stop=True)
+                time.sleep(delay)
+            _check_provider_ready(session)
+            with ddg_pause.request_attempt():
+                try:
+                    yield
+                except _SearchFailure as exc:
+                    if exc.stop and exc.reason != "budget_exhausted" and not exc.block_recorded:
+                        record_block(exc.reason, getattr(session, "_duckduckgo_news_pause_hours", 6))
+                        exc.block_recorded = True
+                        exc.pause_status = block_status()
+                    raise
+    except ddg_pause.PauseError as exc:
+        failure = _SearchFailure(exc.reason, stop=True)
+        failure.block_recorded = True
+        failure.pause_status = block_status()
+        raise failure from None
     finally:
         _REQUEST_LOCK.release()
 
@@ -605,6 +634,7 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
     Configuration uses ``duckduckgo_news_`` keys: timeout (seconds/request, 15),
     total_timeout (shared seconds across requests, 45),
     min_interval (seconds between HTTP request starts, 3; process-shared),
+    pause_hours (persistent provider pause after a block, 6; bounds 1..168),
     max_queries (2), max_results (10 total), cache_ttl (300 seconds), region
     ("auto" selects cn-zh/us-en by query), allowed_domains (additional trusted
     publisher/issuer hostnames), and aliases (optional strong company names).
@@ -672,7 +702,7 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
     if website_key is None:
         company_website = None
     cache_settings = tuple(
-        (k, v) for k, v in settings.items() if k not in {"total_timeout", "min_interval"}
+        (k, v) for k, v in settings.items() if k not in {"total_timeout", "min_interval", "pause_hours"}
     )
     key = (_VERSION, tuple(normalized), start.isoformat(), end.isoformat(), cache_settings, website_key)
     ttl = settings["cache_ttl"]
@@ -682,14 +712,18 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
             _CACHE.move_to_end(key)
             copy = deepcopy(cached[1])
             copy["diagnostics"]["cache_hit"] = True
+            pause = block_status()
+            if pause:
+                copy["diagnostics"]["pause"] = pause
             return copy
     blocked = block_status()
     if blocked:
         diagnostics.update(
-            reason="provider_cooldown",
+            reason=blocked["reason"] if blocked["retry_after_seconds"] is None else "provider_cooldown",
             stop_reason=blocked["reason"],
             stop_search=True,
             retry_after_seconds=blocked["retry_after_seconds"],
+            pause=blocked,
         )
         return result
     diagnostics["limits"] = {
@@ -703,6 +737,7 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
     with requests.Session() as session:
         session._duckduckgo_news_deadline = deadline
         session._duckduckgo_news_min_interval = settings["min_interval"]
+        session._duckduckgo_news_pause_hours = settings["pause_hours"]
         session._duckduckgo_news_transport = diagnostics["transport"]
         # requests' default adapter has zero retries. Never add a retry adapter.
         session.headers.update({"User-Agent": "TradingAgents-NewsEvidence/1.0"})
@@ -721,7 +756,10 @@ def fetch_news(queries: list[str], start_date, end_date, config: dict) -> dict:
                 outcome.update(status="unavailable", reason=exc.reason)
                 if exc.stop:
                     if exc.reason != "budget_exhausted" and not exc.block_recorded:
-                        record_block(exc.reason)
+                        record_block(exc.reason, settings["pause_hours"])
+                    pause = getattr(exc, "pause_status", None) or block_status()
+                    if pause:
+                        diagnostics["pause"] = pause
                     diagnostics["stop_reason"] = exc.reason
                     diagnostics["stop_search"] = True
                     break

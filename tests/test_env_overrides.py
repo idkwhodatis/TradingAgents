@@ -164,6 +164,7 @@ def test_search_env_types_and_export_boolean(monkeypatch):
         TRADINGAGENTS_DUCKDUCKGO_NEWS_TIMEOUT="12.5",
         TRADINGAGENTS_DUCKDUCKGO_NEWS_TOTAL_TIMEOUT="40.5",
         TRADINGAGENTS_DUCKDUCKGO_NEWS_MIN_INTERVAL="2.5",
+        TRADINGAGENTS_DUCKDUCKGO_NEWS_PAUSE_HOURS="12.5",
         TRADINGAGENTS_DUCKDUCKGO_NEWS_CACHE_TTL="120",
         TRADINGAGENTS_DUCKDUCKGO_NEWS_REGION="cn-zh",
         TRADINGAGENTS_DUCKDUCKGO_NEWS_ALLOWED_DOMAINS=" Reuters.com, apnews.com,reuters.com ",
@@ -172,7 +173,7 @@ def test_search_env_types_and_export_boolean(monkeypatch):
     for key, value in {"max_queries": 3, "max_results": 8, "cache_ttl": 120}.items():
         assert config[f"duckduckgo_news_{key}"] == value
         assert isinstance(config[f"duckduckgo_news_{key}"], int)
-    for key, value in {"timeout": 12.5, "total_timeout": 40.5, "min_interval": 2.5}.items():
+    for key, value in {"timeout": 12.5, "total_timeout": 40.5, "min_interval": 2.5, "pause_hours": 12.5}.items():
         assert config[f"duckduckgo_news_{key}"] == value
         assert isinstance(config[f"duckduckgo_news_{key}"], float)
     assert config["duckduckgo_news_region"] == "cn-zh"
@@ -181,7 +182,7 @@ def test_search_env_types_and_export_boolean(monkeypatch):
 
 @pytest.mark.parametrize("suffix,bad", [
     ("MAX_QUERIES", "2.5"), ("MAX_RESULTS", "no"), ("CACHE_TTL", "1.5"),
-    ("TIMEOUT", "slow"), ("TOTAL_TIMEOUT", "nan"), ("MIN_INTERVAL", "inf"),
+    ("TIMEOUT", "slow"), ("TOTAL_TIMEOUT", "nan"), ("MIN_INTERVAL", "inf"), ("PAUSE_HOURS", "nan"),
     ("ALLOWED_DOMAINS", "reuters.com,"), ("ALLOWED_DOMAINS", "reuters.com,,apnews.com"),
     ("ALLOWED_DOMAINS", "https://reuters.com"), ("ALLOWED_DOMAINS", "*.reuters.com"),
     ("ALLOWED_DOMAINS", '["reuters.com"]'), ("ALLOWED_DOMAINS", " "),
@@ -201,7 +202,7 @@ def test_blank_search_list_preserves_default(monkeypatch):
 @pytest.mark.parametrize("suffix,bad", [
     ("MAX_QUERIES", "0"), ("MAX_QUERIES", "9"), ("MAX_RESULTS", "31"),
     ("TIMEOUT", "16"), ("TOTAL_TIMEOUT", "121"), ("CACHE_TTL", "3601"),
-    ("MIN_INTERVAL", "-1"), ("MIN_INTERVAL", "31"), ("REGION", "anywhere"),
+    ("MIN_INTERVAL", "-1"), ("MIN_INTERVAL", "31"), ("PAUSE_HOURS", "0"), ("PAUSE_HOURS", "169"), ("REGION", "anywhere"),
     ("ALLOWED_DOMAINS", "com.cn"),
 ])
 def test_search_env_still_obeys_adapter_bounds(monkeypatch, suffix, bad):
