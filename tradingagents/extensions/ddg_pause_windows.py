@@ -103,7 +103,9 @@ def _security(handle, private):
         elif (kind == win32security.ACCESS_ALLOWED_ACE_TYPE
               and not flags & win32con.INHERIT_ONLY_ACE
               and principal not in trusted and ace[1] & dangerous):
-            raise OSError("writable pause store ancestor")
+            raise OSError(
+                f"writable pause store ancestor (mask={ace[1]:#x}, flags={flags:#x}, sid={principal})"
+            )
 
 
 def _name(name):
@@ -155,7 +157,10 @@ def directory(path, create=False):
             if (not info[0] & win32con.FILE_ATTRIBUTE_DIRECTORY
                     or info[0] & win32con.FILE_ATTRIBUTE_REPARSE_POINT):
                 raise OSError("unsafe pause store directory")
-            _security(handle, private=index == len(parts))
+            try:
+                _security(handle, private=index == len(parts))
+            except OSError as exc:
+                raise OSError(f"pause directory security check failed at depth {index}") from exc
         return result
     except BaseException:
         close_directory(result)
