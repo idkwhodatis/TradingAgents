@@ -414,3 +414,25 @@ def test_live_directory_handle_pins_ancestor_against_rename(store, tmp_path):
     # Closing the pins restores ordinary rename behavior.
     ancestor.rename(destination)
     assert (destination / "tradingagents" / store.name).is_file()
+
+
+def test_owner_rights_ace_means_verified_ancestor_owner(store):
+    pause.record("provider_blocked", hours=1)
+    ancestor = store.parent.parent
+    acl = security(ancestor).GetSecurityDescriptorDacl()
+    acl.AddAccessAllowedAceEx(
+        win32security.ACL_REVISION,
+        win32security.OBJECT_INHERIT_ACE | win32security.CONTAINER_INHERIT_ACE,
+        ntsecuritycon.FILE_ALL_ACCESS,
+        win32security.ConvertStringSidToSid("S-1-3-4"),
+    )
+    win32security.SetNamedSecurityInfo(
+        str(ancestor), win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+        None, None, acl, None,
+    )
+    before = descriptor(ancestor)
+    pause.record("http_429_blocked", hours=8)
+    assert pause.status()["reason"] == "http_429_blocked"
+    assert descriptor(ancestor) == before
+    assert_private(store)

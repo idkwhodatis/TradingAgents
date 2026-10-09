@@ -96,13 +96,17 @@ def _security(handle, private):
         if kind not in (win32security.ACCESS_ALLOWED_ACE_TYPE, win32security.ACCESS_DENIED_ACE_TYPE):
             raise OSError("unsupported pause store ACE")
         principal = win32security.ConvertSidToStringSid(ace[2])
+        # OWNER RIGHTS is the object owner, not an additional account. The owner
+        # was already checked above; do not extend this to CREATOR OWNER/group.
+        # https://learn.microsoft.com/windows-server/identity/ad-ds/manage/understand-security-identifiers
+        effective_principal = owner if principal == "S-1-3-4" else principal
         if private:
             if (kind != win32security.ACCESS_ALLOWED_ACE_TYPE or flags != 0
                     or principal != current or ace[1] != ntsecuritycon.FILE_ALL_ACCESS):
                 raise OSError("non-private pause store ACE")
         elif (kind == win32security.ACCESS_ALLOWED_ACE_TYPE
               and not flags & win32con.INHERIT_ONLY_ACE
-              and principal not in trusted and ace[1] & dangerous):
+              and effective_principal not in trusted and ace[1] & dangerous):
             raise OSError(
                 f"writable pause store ancestor (mask={ace[1]:#x}, flags={flags:#x}, sid={principal})"
             )
