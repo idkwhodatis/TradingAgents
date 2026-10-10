@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tradingagents.agents.rating import parse_rating
 from tradingagents.dataflows.files import locked
+from tradingagents.extensions.canadian_market import canadian_symbol_key
 
 
 class TradingMemoryLog:
@@ -101,6 +102,7 @@ class TradingMemoryLog:
         ``as_of``. This keeps a historical/backtest run from learning from
         outcomes that had not happened yet (#1251). ``as_of=None`` disables the
         filter, so live runs and pre-migration entries are unaffected.
+        Canadian aliases share same-ticker history without rewriting old labels.
         """
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if as_of is not None:
@@ -109,12 +111,14 @@ class TradingMemoryLog:
             return ""
 
         same, cross = [], []
+        ticker_key = canadian_symbol_key(ticker)
         for e in reversed(entries):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break
-            if e["ticker"] == ticker and len(same) < n_same:
+            same_ticker = canadian_symbol_key(e["ticker"]) == ticker_key
+            if same_ticker and len(same) < n_same:
                 same.append(e)
-            elif e["ticker"] != ticker and len(cross) < n_cross:
+            elif not same_ticker and len(cross) < n_cross:
                 cross.append(e)
 
         if not same and not cross:

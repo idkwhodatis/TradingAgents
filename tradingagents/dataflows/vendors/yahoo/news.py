@@ -12,6 +12,7 @@ from tradingagents.dataflows.errors import VendorUnavailableError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import yf_retry
 from tradingagents.extensions.ashare_identity import identity_for, news_queries
+from tradingagents.extensions.canadian_market import canadian_exchange
 from tradingagents.extensions.news_evidence import NewsText
 
 
@@ -151,6 +152,11 @@ def get_news_yfinance(
         "This feed may be incomplete and does not replace official exchange/issuer announcements."
         if verified_ashare else ""
     )
+    if canadian_exchange(canonical):
+        coverage_note += ("\n\nCanadian coverage note: exact .TO/.V listing retained. "
+                          "Yahoo news coverage can be incomplete, especially TSXV and funds; "
+                          "this is not a complete SEDAR+/issuer disclosure search. "
+                          "No US namesake or unsuffixed ticker is substituted.")
     resolved = "" if canonical == ticker else f" (resolved to {canonical})"
     subject = f"news for {ticker}{resolved}"
     feed = yf_retry(lambda: yf.Ticker(canonical).get_news(count=article_limit)) or []

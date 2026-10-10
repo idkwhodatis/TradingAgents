@@ -20,6 +20,7 @@ from cli.run_output import resolve_report_config, run_directory
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.extensions.ashare_identity import identity_for, prepare_instrument
+from tradingagents.extensions.canadian_market import canadian_today
 from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
 from tradingagents.llm_clients.factory import tier_provider
 from tradingagents.llm_clients.headers import parse_llm_headers
@@ -158,7 +159,7 @@ def resolve_analysis_inputs(
 ) -> tuple[str, str, list[str], str]:
     """Validate all user inputs before constructing the graph or making requests."""
     ticker = safe_ticker_component(normalize_symbol(symbol))
-    today = get_current_date()  # At invocation time, not import time; machine-local date.
+    today = canadian_today(ticker) or get_current_date()  # Canadian dates use exchange local time.
     trade_date = today if analysis_date is None else analysis_date
     try:
         canonical = datetime.strptime(trade_date, "%Y-%m-%d").strftime("%Y-%m-%d")

@@ -17,7 +17,8 @@ Missing credentials fail instead of prompting.
 
 ## Defaults and precedence
 
-- **Date:** today in the machine's local timezone, resolved at invocation time;
+- **Date:** today in America/Toronto for Canadian .TO/.V listings (DST-aware),
+  otherwise the machine's local timezone, resolved at invocation time;
   not automatically the last market trading day.
 - **Analysts:** market, sentiment (`social`), news and fundamentals. Auto-detected
   crypto runs use all applicable analysts (market, social and news).

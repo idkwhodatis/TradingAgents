@@ -25,6 +25,7 @@ from pathlib import Path
 from tradingagents.agents.rating import RATING_REVIEW
 from tradingagents.dataflows.date_window import get_current_date
 from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.extensions.canadian_market import canadian_symbol_key
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.memory import TradingMemoryLog
 
@@ -140,8 +141,9 @@ def run_backtest(
 
     The live log stays untouched: a sweep would otherwise flood the context that
     real runs read back. Cells already in this run's log are skipped, so an
-    interrupted sweep resumes by being run again. ``progress(done, total,
-    ticker, date)`` is called before each cell that runs.
+    interrupted sweep resumes by being run again. Canadian aliases identify
+    the same cell. ``progress(done, total, ticker, date)`` is called before each
+    cell that runs, with the first caller-provided spelling of that ticker.
     """
     # run_id becomes a path segment, so it is validated like a ticker: an
     # absolute or dotted value would otherwise place the run outside results_dir.
@@ -153,12 +155,16 @@ def run_backtest(
 
     graph = TradingAgentsGraph(selected_analysts, config=run_config)
     result = BacktestResult(run_id=run_id, log_path=Path(run_config["memory_log_path"]))
-    done = {(e["ticker"], e["date"]) for e in graph.memory_log.load_entries()}
+    done = {(canadian_symbol_key(e["ticker"]), e["date"]) for e in graph.memory_log.load_entries()}
 
-    # A ticker or date given twice is one cell, run and settled once.
-    tickers, dates = list(dict.fromkeys(tickers)), list(dict.fromkeys(dates))
+    # Equivalent Canadian aliases are one cell, including in pre-adapter logs.
+    # Keep the first caller spelling for progress/failures and graph validation.
+    by_key = {}
+    for ticker in tickers:
+        by_key.setdefault(canadian_symbol_key(ticker), ticker)
+    tickers, dates = list(by_key.values()), list(dict.fromkeys(dates))
     cells = [(ticker, date) for ticker in tickers for date in dates]
-    todo = [cell for cell in cells if cell not in done]
+    todo = [(ticker, date) for ticker, date in cells if (canadian_symbol_key(ticker), date) not in done]
     result.skipped = len(cells) - len(todo)
     for index, (ticker, date) in enumerate(todo, 1):
         if progress:

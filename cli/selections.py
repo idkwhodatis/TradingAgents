@@ -38,6 +38,7 @@ from cli.prompts import (
     select_shallow_thinking_agent,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.extensions.canadian_market import canadian_today
 
 
 def get_user_selections(flags=None):
@@ -164,7 +165,7 @@ def _prompt_selections(prefs, flags=None):
         console.print(
             create_question_box(
                 "Step 1: Ticker Symbol",
-                "Enter the ticker, with exchange suffix when needed (e.g. SPY, 0700.HK, BTC-USD)",
+                "Enter the ticker, with exchange suffix when needed (e.g. SPY, TSX:RY, ZSP.TO, TSXV:RCK, 0700.HK, BTC-USD)",
                 "SPY",
             )
         )
@@ -179,10 +180,10 @@ def _prompt_selections(prefs, flags=None):
 
     # Step 2: Analysis date
     if flags.get("date") is not None:
-        analysis_date = _from_flag(parse_analysis_date, flags["date"])
+        analysis_date = _from_flag(parse_analysis_date, flags["date"], selected_ticker)
         console.print(f"[green]✓ Analysis date from --date:[/green] {analysis_date}")
     else:
-        default_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        default_date = canadian_today(selected_ticker) or datetime.datetime.now().strftime("%Y-%m-%d")
         console.print(
             create_question_box(
                 "Step 2: Analysis Date",
@@ -190,7 +191,7 @@ def _prompt_selections(prefs, flags=None):
                 default_date,
             )
         )
-        analysis_date = get_analysis_date()
+        analysis_date = get_analysis_date(selected_ticker) if canadian_today(selected_ticker) else get_analysis_date()
 
     # Step 3: Output language (skipped when set via TRADINGAGENTS_OUTPUT_LANGUAGE)
     if os.environ.get("TRADINGAGENTS_OUTPUT_LANGUAGE"):
@@ -395,13 +396,13 @@ def _prompt_selections(prefs, flags=None):
     }
 
 
-def get_analysis_date():
+def get_analysis_date(ticker: str = ""):
     """Get the analysis date from user input."""
     while True:
         date_str = typer.prompt(
-            "", default=datetime.datetime.now().strftime("%Y-%m-%d")
+            "", default=canadian_today(ticker) or datetime.datetime.now().strftime("%Y-%m-%d")
         )
         try:
-            return parse_analysis_date(date_str)
+            return parse_analysis_date(date_str, ticker)
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
