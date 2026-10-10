@@ -58,7 +58,7 @@ def analyze(
             "portfolio agents size against your actual position.",
         ),
     ] = None,
-    ticker: Annotated[str | None, typer.Option("--ticker", help="Ticker to analyze; skips the prompt.")] = None,
+    ticker: Annotated[str | None, typer.Option("--ticker", help="Ticker to analyze (e.g. TSX:RY, ZSP.TO, TSXV:RCK); skips the prompt.")] = None,
     date: Annotated[str | None, typer.Option("--date", help="Analysis date, YYYY-MM-DD; skips the prompt.")] = None,
     analysts: Annotated[str | None, typer.Option("--analysts", help="Comma-separated analysts; skips the prompt.")] = None,
     save: Annotated[bool | None, typer.Option("--save/--no-save", help="Save the report without asking.")] = None,

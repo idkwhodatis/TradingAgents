@@ -36,7 +36,7 @@ from .setup import GraphSetup
 logger = logging.getLogger(__name__)
 
 
-def _validate_trade_date(trade_date) -> str:
+def _validate_trade_date(trade_date, ticker: str = "") -> str:
     """The run date as a canonical ``YYYY-MM-DD`` string no later than today."""
     value = str(trade_date)
     try:
@@ -45,7 +45,9 @@ def _validate_trade_date(trade_date) -> str:
         canonical = False
     if not canonical:
         raise ValueError(f"trade_date must be a date in YYYY-MM-DD format, got {trade_date!r}")
-    if value > get_current_date():
+    from tradingagents.extensions.canadian_market import canadian_today
+
+    if value > (canadian_today(ticker) or get_current_date()):
         raise ValueError(f"trade_date cannot be in the future: {value}")
     return value
 
@@ -140,7 +142,7 @@ class TradingAgentsGraph:
         identity = resolve_instrument_identity(ticker, self.config)
         return build_instrument_context(ticker, asset_type, identity, trade_date)
 
-    def _memory_as_of(self, trade_date) -> str | None:
+    def _memory_as_of(self, trade_date, ticker: str = "") -> str | None:
         """Point-in-time cutoff for past-context lessons (#1251).
 
         A historical/backtest run (trade date before today) filters lessons to
@@ -148,7 +150,7 @@ class TradingAgentsGraph:
         None, disabling the filter so live behavior and pre-migration entries
         (which have no stored resolution date) are unaffected.
         """
-        return str(trade_date) if is_historical(trade_date) else None
+        return str(trade_date) if is_historical(trade_date, ticker) else None
 
     def _run_signature(self, asset_type: str, portfolio=None) -> str:
         """Run inputs that must invalidate a checkpoint if changed.
@@ -197,7 +199,7 @@ class TradingAgentsGraph:
         ``tradingagents.agents.rating.is_review`` before mapping it to the
         PortfolioRating enum.
         """
-        trade_date = _validate_trade_date(trade_date)
+        trade_date = _validate_trade_date(trade_date, company_name)
         # A reused SDK graph starts a new identity lifecycle. Provider cache
         # freshness applies again, while all steps inside this run share one
         # immutable snapshot (including its checkpoint signature).
@@ -380,8 +382,12 @@ class TradingAgentsGraph:
             logger.warning("Settling past decisions failed: %s", exc)
             note = f"Past decisions could not be settled this run ({type(exc).__name__}); they stay pending."
         try:
-            past_context = self.memory_log.get_past_context(
-                state["company_of_interest"], as_of=self._memory_as_of(state["trade_date"]))
+            from tradingagents.extensions.canadian_market import canadian_exchange
+
+            ticker = state["company_of_interest"]
+            cutoff = (self._memory_as_of(state["trade_date"], ticker) if canadian_exchange(ticker)
+                      else self._memory_as_of(state["trade_date"]))
+            past_context = self.memory_log.get_past_context(ticker, as_of=cutoff)
         except Exception as exc:
             logger.warning("Reading the memory log failed: %s", exc)
             past_context = ""

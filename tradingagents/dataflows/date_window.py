@@ -36,9 +36,12 @@ def get_current_date() -> str:
     return date.today().strftime("%Y-%m-%d")
 
 
-def is_historical(run_date) -> bool:
+def is_historical(run_date, ticker: str = "") -> bool:
     """Whether a run is dated before today, so live-only data would come from after it."""
-    return bool(run_date) and str(run_date) < get_current_date()
+    from tradingagents.extensions.canadian_market import canadian_today
+
+    today = canadian_today(ticker) or get_current_date()
+    return bool(run_date) and str(run_date) < today
 
 
 def coverage_gap(
@@ -115,7 +118,7 @@ def withhold_live_profile(as_of_date: str | None, label: str) -> str | None:
     Every fundamentals vendor withholds on this rule, so switching between them
     cannot reintroduce the leak.
     """
-    if not is_historical(as_of_date):
+    if not is_historical(as_of_date, label):
         return None
     return (
         f"# Company Fundamentals for {label}\n"
@@ -139,7 +142,7 @@ def withhold_undisclosed_trades(as_of_date: str | None, label: str) -> str | Non
     business days later. A past run is told so rather than served trades that
     may not yet have been disclosed.
     """
-    if not is_historical(as_of_date):
+    if not is_historical(as_of_date, label):
         return None
     return (
         f"# Insider Transactions for {label}\n"
@@ -159,7 +162,7 @@ def withhold_undated_statements(as_of_date: str | None, label: str, title: str) 
     were not yet known. A past run is told so; SEC EDGAR, which dates every
     filing, serves US filers as filed.
     """
-    if not is_historical(as_of_date):
+    if not is_historical(as_of_date, label):
         return None
     return (
         f"# {title} for {label}\n"

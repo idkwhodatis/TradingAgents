@@ -251,6 +251,7 @@ TradingAgents works with any market Yahoo Finance covers, using the exchange-suf
 - US: `AAPL`, `SPY`
 - Hong Kong: `0700.HK` · Tokyo: `7203.T` · London: `AZN.L`
 - India: `RELIANCE.NS`, `.BO` · Canada: `.TO` · Australia: `.AX`
+- Canada: TSX `.TO`, TSXV `.V`, including exchange-listed ETFs and REITs (e.g. `RY.TO`, `ZSP.TO`, `REI-UN.TO`, `RCK.V`; `TSX:` / `TSXV:` prefixes also work). See [coverage and limits](docs/canadian-market.md).
 - China A-shares: Shanghai `.SS`, Shenzhen `.SZ`, Beijing `.BJ` (e.g. `600519.SS`, `920819.BJ`; identity support does not guarantee price-vendor coverage)
 - Crypto: `BTC-USD`, `ETH-USD`
 

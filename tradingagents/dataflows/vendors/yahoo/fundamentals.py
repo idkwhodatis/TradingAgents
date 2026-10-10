@@ -15,6 +15,11 @@ from tradingagents.dataflows.vendors.yahoo.common import (
     raise_for_empty,
     yf_retry,
 )
+from tradingagents.extensions.canadian_market import (
+    canadian_exchange,
+    fund_overview,
+    validate_profile,
+)
 
 # Quote currencies Yahoo gives in a minor unit, and the main unit of each.
 _MAIN_UNIT = {"GBp": "GBP", "GBX": "GBP", "ZAc": "ZAR", "ILA": "ILS"}
@@ -38,9 +43,13 @@ def get_fundamentals(
     if withheld:
         return withheld
 
-    info = yf_retry(lambda: yf.Ticker(canonical).info)
+    info = validate_profile(canonical, yf_retry(lambda: yf.Ticker(canonical).info) or {})
     if not info:
         raise_for_empty(ticker, canonical, "fundamentals")
+
+    fund = fund_overview(canonical, info)
+    if fund is not None:
+        return fund
 
     # Yahoo gives these two in percent (dividendYield 0.41 is 0.41%; debtToEquity
     # 78.4 is 78.4%, a ratio of 0.78) but the margins and returns as fractions,
@@ -110,6 +119,11 @@ def _statement(ticker, freq, as_of_date, title, quarterly_attr, annual_attr) -> 
     withheld = withhold_undated_statements(as_of_date, canonical, title)
     if withheld:
         return withheld
+    if canadian_exchange(canonical):
+        profile = get_company_profile(canonical)
+        if str(profile.get("quoteType", "")).upper() in {"ETF", "MUTUALFUND"}:
+            return (f"NOT_APPLICABLE: corporate {title.lower()} for exchange-listed fund "
+                    f"{canonical}. Use sourced fund disclosures; do not invent company statements.")
     what = title.lower()
     attr = quarterly_attr if freq.lower() == "quarterly" else annual_attr
     data = yf_retry(lambda: getattr(yf.Ticker(canonical), attr))
@@ -168,4 +182,5 @@ def get_insider_transactions(
 
 def get_company_profile(ticker: str) -> dict:
     """Yahoo's current profile for ``ticker``: name, sector, industry and the like."""
-    return yf_retry(lambda: yf.Ticker(normalize_symbol(ticker)).info) or {}
+    canonical = normalize_symbol(ticker)
+    return validate_profile(canonical, yf_retry(lambda: yf.Ticker(canonical).info) or {})
