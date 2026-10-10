@@ -21,7 +21,7 @@ from tradingagents.extensions.ashare_identity import (
     render_identity,
     signature_identity,
 )
-from tradingagents.extensions.canadian_market import normalize_canadian_symbol
+from tradingagents.extensions.canadian_market import canadian_listing
 from tradingagents.llm_clients import create_tier_client, tier_provider
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
@@ -325,10 +325,10 @@ class TradingAgentsGraph:
         an explicit ``save_path`` or let it default under ``results_dir``; the
         report is also written as one HTML page unless ``html`` is False.
         """
-        canadian = normalize_canadian_symbol(ticker)
+        canadian = canadian_listing(ticker)
         if canadian is not None:
             state_symbol = final_state.get("company_of_interest")
-            if state_symbol and normalize_canadian_symbol(state_symbol) != canadian:
+            if state_symbol and canadian_listing(state_symbol) != canadian:
                 raise ValueError("Report ticker does not match the analyzed Canadian listing")
             ticker = safe_ticker_component(canadian)
         identity = final_state.get("instrument_identity") or {}

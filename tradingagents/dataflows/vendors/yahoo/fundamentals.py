@@ -120,7 +120,13 @@ def _statement(ticker, freq, as_of_date, title, quarterly_attr, annual_attr) -> 
     if withheld:
         return withheld
     if canadian_exchange(canonical):
-        profile = get_company_profile(canonical)
+        try:
+            profile = get_company_profile(canonical)
+        except VendorUnavailableError:
+            # The profile only classifies funds; its separate endpoint failing
+            # says nothing about statement availability. Still request the exact
+            # listing. An explicit profile mismatch (ValueError) must not pass.
+            profile = {}
         if str(profile.get("quoteType", "")).upper() in {"ETF", "MUTUALFUND"}:
             return (f"NOT_APPLICABLE: corporate {title.lower()} for exchange-listed fund "
                     f"{canonical}. Use sourced fund disclosures; do not invent company statements.")

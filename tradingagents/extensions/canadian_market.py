@@ -53,7 +53,7 @@ def normalize_canadian_symbol(value: str) -> str | None:
 
 
 def canadian_exchange(ticker: str) -> str | None:
-    canonical = normalize_canadian_symbol(ticker)
+    canonical = canadian_listing(ticker)
     return ("TSX" if canonical.endswith(".TO") else "TSXV") if canonical else None
 
 
@@ -76,12 +76,22 @@ def canadian_symbol_key(ticker: str) -> str:
         return ticker
 
 
+def canadian_listing(ticker: str) -> str | None:
+    """Classify accepted aliases consistently at Canadian policy boundaries.
+
+    Some public SDK boundaries run before instrument preparation. Suffix-form
+    broker aliases such as RY.TO+ must carry the same date, vendor and identity
+    rules as RY.TO there. Revalidate the tolerant comparison key so malformed
+    explicit prefixes still raise rather than bypassing a Canadian guard.
+    """
+    return normalize_canadian_symbol(canadian_symbol_key(ticker))
+
+
 def validate_profile(ticker: str, info: dict) -> dict:
     """Reject an explicitly mismatched listing, even for a cross-listed issuer."""
-    if canadian_exchange(ticker) and info.get("symbol"):
-        expected = normalize_canadian_symbol(ticker)
-        if str(info["symbol"]).strip().upper() != expected:
-            raise ValueError(f"Provider profile does not match requested listing {expected}")
+    expected = canadian_listing(ticker)
+    if expected and info.get("symbol") and str(info["symbol"]).strip().upper() != expected:
+        raise ValueError(f"Provider profile does not match requested listing {expected}")
     return info
 
 

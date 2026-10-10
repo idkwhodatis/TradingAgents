@@ -30,6 +30,9 @@ the supplied holdings. A holding in `BBD.B.TO` matches an analysis of
 `BBD-B.TO`; `RY` and `RY.TO` remain distinct. After a Python SDK analysis,
 `graph.save_reports(state, "TSX:RY")` uses the canonical `RY.TO` report name
 and safe output directory. A mismatching state listing is rejected.
+Accepted SDK broker qualifiers such as `RY.TO+` keep the same Canadian date,
+vendor-routing and report-identity rules as `RY.TO`, including before run
+preparation canonicalizes the ticker.
 
 Stocks, ETFs, REITs and other **exchange-listed** funds are in scope.
 Non-exchange NAV-priced mutual funds are outside this adapter. Existing
