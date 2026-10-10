@@ -57,6 +57,25 @@ def canadian_exchange(ticker: str) -> str | None:
     return ("TSX" if canonical.endswith(".TO") else "TSXV") if canonical else None
 
 
+def canadian_symbol_key(ticker: str) -> str:
+    """Compare run/log keys using the same Canadian aliases as propagation.
+
+    Non-Canadian and unrecognized legacy keys keep their exact spelling. This
+    is only a comparison key, not validation or a rewrite of persisted records;
+    an invalid ticker still fails normal validation when its analysis runs.
+    """
+    try:
+        # The SDK's date guard parses the raw input first, rejecting malformed
+        # prefixes such as TSX:RY+. Such inputs must not hide a valid later cell.
+        canonical = normalize_canadian_symbol(ticker)
+        # For suffix-form inputs the guard permits a broker qualifier, which
+        # normalize_symbol removes before preparing the run (e.g. ry.to+).
+        return canonical or normalize_canadian_symbol(ticker.strip().rstrip("+")) or ticker
+    except ValueError:
+        # One unsupported legacy entry must not block unrelated cells/decisions.
+        return ticker
+
+
 def validate_profile(ticker: str, info: dict) -> dict:
     """Reject an explicitly mismatched listing, even for a cross-listed issuer."""
     if canadian_exchange(ticker) and info.get("symbol"):

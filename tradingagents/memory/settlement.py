@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
+from tradingagents.extensions.canadian_market import canadian_symbol_key
 
 logger = logging.getLogger(__name__)
 
@@ -115,23 +116,30 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
     Entries whose window has not traded yet are skipped; an entry whose prices
     or reflection could not be had stays pending and is reported as failed.
     With ``wait=False`` a pass already running elsewhere is left to do the work.
+    Canadian aliases match both canonical and legacy records; returned ticker
+    labels and updates retain each record's stored spelling.
     """
     result = Settlement()
+    ticker = canadian_symbol_key(ticker)
     with memory_log.settling(wait=wait) as held:
         if not held:
             return result
-        pending = [e for e in memory_log.get_pending_entries() if e["ticker"] == ticker]
+        pending = [e for e in memory_log.get_pending_entries()
+                   if canadian_symbol_key(e["ticker"]) == ticker]
         if not pending:
             return result
         benchmark = resolve_benchmark(ticker, config)
         for entry in pending:
+            # The lookup uses canonical listing identity, but the write and
+            # result name the actual record (including pre-adapter aliases).
+            stored_ticker = entry["ticker"]
             try:
                 raw, alpha, days, resolution_date = fetch_returns(
                     ticker, entry["date"], config.get("holding_period_days", 5), benchmark=benchmark,
                 )
             except Exception as exc:
                 logger.warning("Prices for settling %s on %s were unavailable: %s", ticker, entry["date"], exc)
-                result.failed.append((ticker, entry["date"], f"prices unavailable: {exc}"))
+                result.failed.append((stored_ticker, entry["date"], f"prices unavailable: {exc}"))
                 continue
             if raw is None:
                 continue  # the holding window has not traded yet: try again next run
@@ -147,11 +155,11 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
                 # Reflection calls a provider: a transient failure leaves the entry
                 # pending for the next pass rather than stopping the analysis.
                 logger.warning("Reflection failed for %s on %s: %s", ticker, entry["date"], exc)
-                result.failed.append((ticker, entry["date"], f"reflection failed: {exc}"))
+                result.failed.append((stored_ticker, entry["date"], f"reflection failed: {exc}"))
                 continue
-            if memory_log.update_with_outcome(ticker, entry["date"], raw, alpha, days, reflection,
+            if memory_log.update_with_outcome(stored_ticker, entry["date"], raw, alpha, days, reflection,
                                               resolution_date=resolution_date):
-                result.settled.append((ticker, entry["date"]))
+                result.settled.append((stored_ticker, entry["date"]))
     return result
 
 
@@ -162,7 +170,7 @@ def settle_all_pending(memory_log, reflector, config: dict, wait: bool = True) -
     keep its decisions pending, and their lessons out of later runs.
     """
     result = Settlement()
-    for ticker in dict.fromkeys(e["ticker"] for e in memory_log.get_pending_entries()):
+    for ticker in dict.fromkeys(canadian_symbol_key(e["ticker"]) for e in memory_log.get_pending_entries()):
         done = settle_pending(ticker, memory_log, reflector, config, wait=wait)
         result.settled.extend(done.settled)
         result.failed.extend(done.failed)
