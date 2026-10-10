@@ -128,12 +128,14 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
                    if canadian_symbol_key(e["ticker"]) == ticker]
         if not pending:
             return result
-        benchmark = resolve_benchmark(ticker, config)
         for entry in pending:
             # The lookup uses canonical listing identity, but the write and
             # result name the actual record (including pre-adapter aliases).
             stored_ticker = entry["ticker"]
             try:
+                # Legacy symbols or benchmark aliases may no longer validate.
+                # Report those entries without starving later tickers in the log.
+                benchmark = resolve_benchmark(ticker, config)
                 raw, alpha, days, resolution_date = fetch_returns(
                     ticker, entry["date"], config.get("holding_period_days", 5), benchmark=benchmark,
                 )

@@ -10,6 +10,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.memory import TradingMemoryLog, settlement
+from tradingagents.portfolio import PortfolioContext
 
 DATE = "2026-01-05"
 DECISION = "Rating: Buy\nOffline decision"
@@ -201,3 +202,140 @@ def test_backtest_failure_and_progress_preserve_caller_labels(tmp_path, offline_
     assert result.failures == [("TSX:RY", DATE, "analysis failed")]
     assert result.settlement_failures == [("TSX:RY", "settlement failed")]
     assert seen == [(1, 1, "TSX:RY", DATE)]
+
+
+@pytest.mark.parametrize("invalid", ["ENB.PF.V.TO", "ENB.PR.V", "TSXV:RY.TO"])
+@pytest.mark.parametrize("entrypoint", ["all", "propagate"])
+def test_rejected_legacy_tickers_do_not_starve_other_pending_decisions(
+    tmp_path, offline_graph, invalid, entrypoint,
+):
+    graph = TradingAgentsGraph(config=config(tmp_path))
+    log = graph.memory_log
+    failed_rows = [(invalid, DATE), (invalid, "2026-01-06")]
+    valid_rows = [("AAPL", DATE), ("ry.to", DATE)]
+    for ticker, date in failed_rows + valid_rows:
+        log.store_decision(ticker, date, DECISION)
+
+    if entrypoint == "all":
+        result = graph.settle_all_pending()
+        assert result.settled == valid_rows
+        assert [item[:2] for item in result.failed] == failed_rows
+        assert all("prices unavailable:" in item[2] for item in result.failed)
+    else:
+        state, _ = graph.propagate("AAPL", "2026-02-01")
+        assert "Past analyses of AAPL" in state["past_context"]
+        assert "Offline reflection" in state["past_context"]
+        assert state["memory_note"].startswith("2 past decision(s) could not be settled")
+    assert [(e["ticker"], e["date"]) for e in log.load_entries() if not e["pending"]] == valid_rows
+    # The single-ticker SDK reports each rejected record too; it does not raise
+    # or rewrite it, and those failures cannot prevent later valid runs.
+    again = graph.settle_pending(invalid)
+    assert not again.settled
+    assert [item[:2] for item in again.failed] == failed_rows
+    assert [call.args[0] for call in offline_graph[1].call_args_list] == ["AAPL", "RY.TO"]
+    assert [(e["ticker"], e["date"]) for e in log.load_entries()[:4]] == failed_rows + valid_rows
+
+
+def test_invalid_benchmark_is_reported_for_each_record_and_can_retry(tmp_path, offline_graph):
+    graph = TradingAgentsGraph(config={**config(tmp_path), "benchmark_ticker": "ENB.PF.V.TO"})
+    rows = [("ry.to", DATE), ("RY.TO", "2026-01-06"), ("AAPL", DATE)]
+    for ticker, date in rows:
+        graph.memory_log.store_decision(ticker, date, DECISION)
+    result = graph.settle_all_pending()
+    assert not result.settled
+    assert [item[:2] for item in result.failed] == rows
+    offline_graph[1].assert_not_called()
+    graph.config["benchmark_ticker"] = "SPY"
+    retried = graph.settle_all_pending()
+    assert retried.settled == rows and not retried.failed
+
+
+@pytest.mark.parametrize("legacy,canonical", ALIASES)
+def test_sdk_keeps_legacy_same_listing_decisions_and_reflections(
+    tmp_path, offline_graph, legacy, canonical,
+):
+    graph = TradingAgentsGraph(config=config(tmp_path))
+    log = graph.memory_log
+    log.store_decision(legacy, DATE, "Rating: Buy\nPrior Canadian decision")
+    log.update_with_outcome(legacy, DATE, 0.1, 0.05, 5, "Prior Canadian lesson", "2026-01-12")
+    # Fill the cross-ticker limit, so a wrongly classified lesson disappears.
+    for day in ["2026-01-06", "2026-01-07", "2026-01-08"]:
+        log.store_decision("AAPL", day, DECISION)
+        log.update_with_outcome("AAPL", day, 0.1, 0.05, 5, "Other lesson", "2026-01-15")
+    log.store_decision(canonical, "2026-01-20", "Rating: Buy\nFuture Canadian decision")
+    log.update_with_outcome(canonical, "2026-01-20", 0.1, 0.05, 5, "Future lesson", "2026-03-01")
+    before = log.load_entries()
+
+    # Public memory reads and propagation use the same key on both sides.
+    direct = log.get_past_context(legacy, as_of="2026-02-01")
+    state, _ = graph.propagate(legacy, "2026-02-01")
+    assert state["company_of_interest"] == canonical
+    assert f"Past analyses of {canonical}" in state["past_context"]
+    for context in [direct, state["past_context"]]:
+        same, cross = context.split("Recent cross-ticker lessons:")
+        assert "Prior Canadian decision" in same and "Prior Canadian lesson" in same
+        assert "Prior Canadian lesson" not in cross
+        assert cross.count("Other lesson") == 3
+        assert "Future" not in context
+    assert log.load_entries()[:len(before)] == before
+
+
+@pytest.mark.parametrize("stored,requested", [
+    ("RY", "RY.TO"), ("RY.V", "RY.TO"), ("RY.TO", "RY"),
+    ("nvda", "NVDA"), ("BRK.B", "BRK-B"), ("BTCUSD", "BTC-USD"),
+    ("600519.SH", "600519.SS"), ("TSX:RY+", "RY.TO"),
+])
+def test_memory_does_not_merge_other_listing_or_non_canadian_keys(tmp_path, stored, requested):
+    log = TradingMemoryLog(config(tmp_path))
+    log.store_decision(stored, DATE, "Rating: Buy\nDistinct decision")
+    log.update_with_outcome(stored, DATE, 0.1, 0.05, 5, "Distinct lesson", "2026-01-12")
+    before = log.load_entries()
+    context = log.get_past_context(requested, as_of="2026-02-01")
+    assert "Past analyses" not in context
+    assert "Distinct decision" not in context and "Distinct lesson" in context
+    assert "Distinct decision" in log.get_past_context(stored, as_of="2026-02-01")
+    assert log.load_entries() == before
+
+
+@pytest.mark.parametrize("raw,canonical", [
+    ("ry.to+", "RY.TO"), ("RCK.V+", "RCK.V"), ("BBD.B.TO+", "BBD-B.TO"),
+    (" ENB.PR.V.TO+ ", "ENB-PV.TO"),
+])
+@pytest.mark.parametrize("canonical_holding", [False, True])
+def test_sdk_qualifier_keeps_held_position_without_mutating_book(
+    tmp_path, offline_graph, raw, canonical, canonical_holding,
+):
+    graph = TradingAgentsGraph(config=config(tmp_path))
+    holding = canonical if canonical_holding else raw
+    book = PortfolioContext.model_validate({"currency": "CAD", "positions": [
+        {"ticker": holding, "quantity": 120, "average_price": 150},
+        {"ticker": "RY", "quantity": 7},
+        {"ticker": "TSX:RY+", "quantity": 3},
+    ]})
+    before, fingerprint = book.model_dump(), book.fingerprint()
+    state, _ = graph.propagate(raw, "2026-02-01", portfolio=book)
+    assert f"Current position in {canonical}: 120 units, average price 150.00" in state["portfolio_context"]
+    assert "Other positions: RY 7, TSX:RY+ 3" in state["portfolio_context"]
+    assert book.position_in(canonical) is book.positions[0]
+    assert book.position_in(raw) is book.positions[0]
+    assert book.position_in("RY") is book.positions[1]
+    assert book.model_dump() == before and book.fingerprint() == fingerprint
+
+
+@pytest.mark.parametrize("raw,other", [
+    (" aapl ", "AAPL+"), ("btc-usd", "BTCUSD"), ("brk.b", "BRK-B"),
+    ("600519.sh", "600519.SS"), ("ry", "RY.TO"),
+])
+def test_portfolio_keeps_existing_non_canadian_comparison_rules(raw, other):
+    book = PortfolioContext.model_validate({"positions": [{"ticker": raw, "quantity": 7}]})
+    assert book.position_in(raw.strip().upper()) is book.positions[0]
+    assert book.position_in(other) is None
+
+
+@pytest.mark.parametrize("invalid", ["ENB.PF.V.TO", "ENB.PR.V", "TSXV:RY.TO", "TSX:RY+"])
+def test_legacy_comparison_does_not_relax_new_sdk_input_validation(tmp_path, offline_graph, invalid):
+    graph = TradingAgentsGraph(config=config(tmp_path))
+    with pytest.raises(ValueError):
+        graph.propagate(invalid, DATE)
+    assert not graph.memory_log.load_entries()
+    assert not offline_graph[0]

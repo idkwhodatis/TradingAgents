@@ -22,14 +22,12 @@ from pydantic import BaseModel, Field, ValidationError
 
 def _position_symbol(ticker: str) -> str:
     """Compare Canadian aliases without changing the caller's book or US listings."""
-    from tradingagents.extensions.canadian_market import normalize_canadian_symbol
+    from tradingagents.extensions.canadian_market import canadian_symbol_key
 
-    symbol = ticker.strip().upper()
-    try:
-        return normalize_canadian_symbol(symbol) or symbol
-    except ValueError:
-        # An unrelated, unsupported holding must not prevent rendering the book.
-        return symbol
+    # Keep the book's existing case-insensitive matching for other markets.
+    # The shared key also handles supported suffix-form broker qualifiers and
+    # leaves unrelated, unsupported holdings available for rendering.
+    return canadian_symbol_key(ticker.strip().upper())
 
 
 class Position(BaseModel):
