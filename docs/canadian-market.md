@@ -17,6 +17,20 @@ tradingagents analyze TSXV:RCK
 are rejected. A canonical suffix is a listing request, not proof of current
 listing, liquidity, quote currency, fund type or data availability.
 
+Native TSX preferred-share `.PR.<series>` notation is handled explicitly:
+`TSX:ENB.PR.V` and `ENB.PR.V.TO` both become Yahoo's `ENB-PV.TO`.
+Here `V` names the preferred series, not TSXV. An unqualified `ENB.PR.V`
+is ambiguous and is rejected; use the TSX prefix or exact Yahoo symbol.
+Unsupported preferred notation (such as `.PF.<series>`) requires the exact
+Yahoo symbol rather than a guessed hyphenation. Genuine exchange conflicts,
+including `TSX:RCK.V`, still fail.
+
+Portfolio comparisons recognize the same Canadian aliases without modifying
+the supplied holdings. A holding in `BBD.B.TO` matches an analysis of
+`BBD-B.TO`; `RY` and `RY.TO` remain distinct. After a Python SDK analysis,
+`graph.save_reports(state, "TSX:RY")` uses the canonical `RY.TO` report name
+and safe output directory. A mismatching state listing is rejected.
+
 Stocks, ETFs, REITs and other **exchange-listed** funds are in scope.
 Non-exchange NAV-priced mutual funds are outside this adapter. Existing
 `asset_type="stock"` remains the graph/CLI compatibility category for all these
@@ -90,3 +104,5 @@ Run `pytest -q` and `ruff check .`. `tests/test_canadian_market.py` covers
 company, ETF, REIT, TSXV, USD-class notation, rejected namesake metadata,
 unsupported vendor chains, exact news attribution, OHLCV and winter/summer date
 boundaries without external requests or LLM calls.
+`tests/test_canadian_run_boundaries.py` covers portfolio aliases, CLI/SDK entry
+points, preferred shares, report exports and unsafe path rejection.

@@ -33,7 +33,7 @@ def is_valid_ticker_input(value: str) -> bool:
     allowed (it defaults to SPY downstream).
     """
     v = value.strip()
-    if v.upper().startswith(("TSX:", "TSXV:")):
+    if v.upper().startswith(("TSX:", "TSXV:")) or v.upper().endswith((".TO", ".V")):
         from tradingagents.extensions.canadian_market import normalize_canadian_symbol
 
         try:

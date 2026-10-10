@@ -20,6 +20,18 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 
+def _position_symbol(ticker: str) -> str:
+    """Compare Canadian aliases without changing the caller's book or US listings."""
+    from tradingagents.extensions.canadian_market import normalize_canadian_symbol
+
+    symbol = ticker.strip().upper()
+    try:
+        return normalize_canadian_symbol(symbol) or symbol
+    except ValueError:
+        # An unrelated, unsupported holding must not prevent rendering the book.
+        return symbol
+
+
 class Position(BaseModel):
     ticker: str = Field(description="Instrument symbol, e.g. AAPL")
     quantity: float = Field(description="Signed units held; negative is short")
@@ -32,7 +44,8 @@ class PortfolioContext(BaseModel):
     positions: list[Position] = Field(default_factory=list)
 
     def position_in(self, ticker: str) -> Position | None:
-        return next((p for p in self.positions if p.ticker.upper() == ticker.strip().upper()), None)
+        symbol = _position_symbol(ticker)
+        return next((p for p in self.positions if _position_symbol(p.ticker) == symbol), None)
 
     def render(self, ticker: str) -> str:
         """The portfolio block for the decision agents, led by the analyzed instrument."""

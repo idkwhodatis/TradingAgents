@@ -12,6 +12,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 _PREFIX = re.compile(r"^(TSX|TSXV):([A-Z0-9][A-Z0-9.-]*)$")
+_NATIVE_PREFERRED = re.compile(r"^[A-Z0-9][A-Z0-9-]*\.P[RF]\.[A-Z]+$")
+_PREFERRED = re.compile(r"^([A-Z0-9][A-Z0-9-]*)\.PR\.([A-Z]+)$")
 _LISTING = re.compile(r"^([A-Z0-9][A-Z0-9-]*)\.(TO|V)$")
 
 
@@ -24,17 +26,27 @@ def normalize_canadian_symbol(value: str) -> str | None:
             raise ValueError("Use TSX:RY / TSXV:RCK or Yahoo RY.TO / RCK.V")
         exchange, code = match.groups()
         suffix = "TO" if exchange == "TSX" else "V"
-        if code.endswith((".TO", ".V")):
+        # In native preferred notation the final V is a series, not TSXV.
+        if not _NATIVE_PREFERRED.fullmatch(code) and code.endswith((".TO", ".V")):
             code, supplied = code.rsplit(".", 1)
             if supplied != suffix:
                 raise ValueError("Canadian exchange prefix and suffix disagree")
-        # TSX class/unit notation (REI.UN, BBD.B, DLR.U) is hyphenated at Yahoo.
-        value = f"{code.replace('.', '-')}.{suffix}"
     elif value.endswith((".TO", ".V")):
+        if _NATIVE_PREFERRED.fullmatch(value):
+            raise ValueError("Ambiguous preferred-share notation; use an explicit TSX: prefix or Yahoo symbol")
         code, suffix = value.rsplit(".", 1)
-        value = f"{code.replace('.', '-')}.{suffix}"
     else:
         return None
+    preferred = _PREFERRED.fullmatch(code)
+    if preferred:
+        if suffix != "TO":
+            raise ValueError("Native preferred-share notation requires TSX; use the exact Yahoo symbol")
+        # Yahoo spells TSX .PR.<series> as -P<series>, e.g. ENB.PR.V -> ENB-PV.TO.
+        code = f"{preferred[1]}-P{preferred[2]}"
+    elif {"PR", "PF"}.intersection(code.split(".")):
+        raise ValueError("Unsupported preferred-share notation; use the exact Yahoo symbol, e.g. ENB-PV.TO")
+    # Ordinary class/unit notation (REI.UN, BBD.B, DLR.U) is hyphenated at Yahoo.
+    value = f"{code.replace('.', '-')}.{suffix}"
     if not _LISTING.fullmatch(value):
         raise ValueError("Invalid Canadian exchange-listed ticker")
     return value
