@@ -72,6 +72,12 @@ listings; provider `quoteType` and instrument context distinguish funds.
 - Historical Yahoo profiles/statements remain withheld because they lack
   reliable point-in-time vintages. Canada support does not add historical
   Canadian filings or remove the fork's anti-lookahead protection.
+- Default settlement/backtest alpha uses `^GSPTSE` for TSX `.TO` and `^SPCDNX`
+  for TSXV `.V`, including their accepted aliases. `benchmark_ticker` still
+  overrides the suffix map; a custom `.V` mapping is also respected. Missing
+  benchmark history leaves the outcome pending instead of substituting SPY.
+  Changing the benchmark does not recalculate already-settled memory entries;
+  use a new backtest run ID to measure a historical experiment under a new baseline.
 
 Shared agent context covers Canadian sessions, BoC/CAD exposure, SEDAR+/issuer
 sources, sparse TSXV coverage, fund analysis and REIT metrics without implying

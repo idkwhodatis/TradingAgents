@@ -83,6 +83,8 @@ def test_backtest_settles_and_resumes_actual_sdk_decisions(tmp_path, offline_gra
     assert summarize(first).resolved == 1 and summarize(first).pending == 0
     assert offline_graph[0] == [(canonical, DATE)]
     assert offline_graph[1].call_count == 1
+    expected_benchmark = "^SPCDNX" if canonical.endswith(".V") else "^GSPTSE"
+    assert offline_graph[1].call_args.kwargs["benchmark"] == expected_benchmark
     assert seen == [(1, 1, raw, DATE)]
     assert tickers == [raw] and dates == [DATE]
     assert not (tmp_path / "live.md").exists()
