@@ -38,6 +38,7 @@ from tradingagents.dataflows.vendors.yahoo.market import (
     get_YFin_data_online,
 )
 from tradingagents.dataflows.vendors.yahoo.news import get_global_news_yfinance, get_news_yfinance
+from tradingagents.extensions.canadian_market import compatible_vendors
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,13 @@ def route_to_vendor(method: str, *args, **kwargs):
             )
     else:
         vendor_chain = all_available_vendors
+
+    symbol = args[0] if args and isinstance(args[0], str) else kwargs.get("ticker", kwargs.get("symbol", ""))
+    vendor_chain = compatible_vendors(method, symbol, vendor_chain)
+    if not vendor_chain:
+        return (f"DATA_UNAVAILABLE: configured vendors do not support the exact Canadian "
+                f"listing {symbol} for {method}. Configure yfinance; do not substitute a US symbol "
+                "or fabricate unavailable values.")
 
     last_no_data: NoMarketDataError | None = None
     last_unavailable: VendorUnavailableError | None = None

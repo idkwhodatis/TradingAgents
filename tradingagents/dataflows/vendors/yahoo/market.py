@@ -11,6 +11,7 @@ from tradingagents.dataflows.errors import NoMarketDataError, VendorError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
 from tradingagents.dataflows.vendors.yahoo.ohlcv import _assert_ohlcv_not_stale, load_ohlcv
+from tradingagents.extensions.canadian_market import canadian_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ def get_YFin_data_online(
     # instrument was priced.
     label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
     header = f"# Stock data for {label} from {start_date} to {end_date}\n"
+    if canadian_exchange(canonical):
+        header += ("# Canadian listing; exchange session time zone America/Toronto. "
+                   "Quote currency must be verified from provider metadata (CAD or USD); "
+                   "historical bars are not a live quote.\n")
     header += f"# Total records: {len(data)}\n\n"
 
     return header + csv_string

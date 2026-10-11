@@ -125,8 +125,13 @@ def normalize_symbol(raw: str) -> str:
     # Broker CFD/qualifier suffixes Yahoo never uses.
     s = s.rstrip("+")
 
+    from tradingagents.extensions.canadian_market import normalize_canadian_symbol
+
+    canadian = normalize_canadian_symbol(s)
     crypto = _normalize_crypto(s)
-    if s in _ALIASES:
+    if canadian is not None:
+        canonical = canadian
+    elif s in _ALIASES:
         canonical = _ALIASES[s]
     elif crypto is not None:
         canonical = crypto

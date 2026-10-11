@@ -20,6 +20,16 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 
+def _position_symbol(ticker: str) -> str:
+    """Compare Canadian aliases without changing the caller's book or US listings."""
+    from tradingagents.extensions.canadian_market import canadian_symbol_key
+
+    # Keep the book's existing case-insensitive matching for other markets.
+    # The shared key also handles supported suffix-form broker qualifiers and
+    # leaves unrelated, unsupported holdings available for rendering.
+    return canadian_symbol_key(ticker.strip().upper())
+
+
 class Position(BaseModel):
     ticker: str = Field(description="Instrument symbol, e.g. AAPL")
     quantity: float = Field(description="Signed units held; negative is short")
@@ -32,7 +42,8 @@ class PortfolioContext(BaseModel):
     positions: list[Position] = Field(default_factory=list)
 
     def position_in(self, ticker: str) -> Position | None:
-        return next((p for p in self.positions if p.ticker.upper() == ticker.strip().upper()), None)
+        symbol = _position_symbol(ticker)
+        return next((p for p in self.positions if _position_symbol(p.ticker) == symbol), None)
 
     def render(self, ticker: str) -> str:
         """The portfolio block for the decision agents, led by the analyzed instrument."""

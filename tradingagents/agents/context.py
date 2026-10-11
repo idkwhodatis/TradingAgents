@@ -8,6 +8,7 @@ from typing import Any
 from tradingagents.dataflows.date_window import is_historical
 from tradingagents.dataflows.vendors.yahoo.fundamentals import get_company_profile
 from tradingagents.extensions.ashare_identity import identity_for, render_identity
+from tradingagents.extensions.canadian_market import market_context
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,8 @@ def _identity(ticker: str) -> dict:
         ("industry", "industry"),
         ("exchange", "exchange"),
         ("quoteType", "quote_type"),
+        ("currency", "currency"),
+        ("financialCurrency", "financial_currency"),
     ):
         value = _clean_identity_value(info.get(source_key))
         if value:
@@ -146,10 +149,11 @@ def build_instrument_context(
     )
 
     identity = identity or {}
+    context += market_context(ticker, identity, historical=is_historical(trade_date, ticker))
     if (identity.get("canonical_symbol") == ticker
             and identity.get("status") in {"resolved", "unavailable"}):
         context += "\n\n" + render_identity(dict(identity))
-        if is_historical(trade_date):
+        if is_historical(trade_date, ticker):
             context += (
                 f" These are current identity names, not point-in-time evidence for {trade_date}; "
                 "the company may have been named differently on that date."
@@ -158,7 +162,7 @@ def build_instrument_context(
     name = identity.get("company_name") or identity.get("name")
     label = "Name" if is_crypto else "Company"
     details = []
-    if is_historical(trade_date):
+    if is_historical(trade_date, ticker):
         if name:
             details.append(
                 f"{label}: {name} (its current name, given only to identify it; "

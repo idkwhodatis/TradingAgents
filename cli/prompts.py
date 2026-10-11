@@ -13,7 +13,7 @@ from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.model_catalog import get_model_options
 from tradingagents.llm_clients.opencode_go import GO_BASE_URL
 
-TICKER_INPUT_EXAMPLES = "SPY, 0700.HK, BTC-USD"
+TICKER_INPUT_EXAMPLES = "SPY, TSX:RY, ZSP.TO, TSXV:RCK, 0700.HK, BTC-USD"
 
 ANALYST_CHOICES = [
     ("Market Analyst", AnalystType.MARKET),
@@ -33,6 +33,13 @@ def is_valid_ticker_input(value: str) -> bool:
     allowed (it defaults to SPY downstream).
     """
     v = value.strip()
+    if v.upper().startswith(("TSX:", "TSXV:")) or v.upper().endswith((".TO", ".V")):
+        from tradingagents.extensions.canadian_market import normalize_canadian_symbol
+
+        try:
+            return len(v) <= 32 and normalize_canadian_symbol(v) is not None
+        except ValueError:
+            return False
     return not v or (all(ch.isalnum() or ch in "._-^=" for ch in v) and len(v) <= 32)
 
 
@@ -71,13 +78,16 @@ def parse_ticker(value: str) -> str:
     return normalize_ticker_symbol(value)
 
 
-def parse_analysis_date(value: str) -> str:
+def parse_analysis_date(value: str, ticker: str = "") -> str:
     """An analysis date as YYYY-MM-DD, today or earlier."""
     try:
         day = datetime.datetime.strptime(value.strip(), "%Y-%m-%d").date()
     except ValueError:
         raise ValueError(f"not a date: {value!r}; use YYYY-MM-DD") from None
-    if day > datetime.date.today():
+    from tradingagents.extensions.canadian_market import canadian_today
+
+    today = canadian_today(ticker) or datetime.date.today().isoformat()
+    if day.isoformat() > today:
         raise ValueError(f"{value} is in the future")
     return day.isoformat()
 

@@ -253,7 +253,9 @@ def prepare_instrument(ticker: str, asset_type: str, config: dict) -> tuple[str,
     canonical = safe_ticker_component(normalize_symbol(ticker))
     match = _CANDIDATE.fullmatch(canonical)
     if not match or asset_type != "stock":
-        return ticker, copied
+        from tradingagents.extensions.canadian_market import canadian_exchange
+
+        return (canonical if canadian_exchange(canonical) else ticker), copied
     code, suffix = match.groups()
     enabled = copied.get("ashare_identity_enabled", True)
     if not isinstance(enabled, bool):
