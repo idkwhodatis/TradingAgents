@@ -11,7 +11,11 @@ import pytest
 from tradingagents.default_config import _apply_env_overrides
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.factory import build_llm_kwargs, create_llm_client
-from tradingagents.llm_clients.model_catalog import get_known_models, get_model_options
+from tradingagents.llm_clients.model_catalog import (
+    LEGACY_MODELS,
+    get_known_models,
+    get_model_options,
+)
 from tradingagents.llm_clients.opencode_go import (
     GO_BASE_URL,
     GO_MODEL_APIS,
@@ -171,6 +175,16 @@ def test_catalog_and_key_mapping():
         options = get_model_options("opencode-go", mode)
         assert ("Custom model ID", "custom") in options
         assert all(model in GO_MODEL_APIS or model == "custom" for _, model in options)
+
+
+def test_go_legacy_catalog_contains_only_supported_non_picker_models():
+    offered = {model for mode in ("quick", "deep")
+               for _, model in get_model_options("opencode-go", mode)} - {"custom"}
+    legacy = set(LEGACY_MODELS["opencode-go"])
+
+    assert legacy.isdisjoint(offered)
+    assert legacy | offered == set(GO_MODEL_APIS)
+    assert set(get_known_models()["opencode-go"]) == set(GO_MODEL_APIS) | {"custom"}
 
 
 def test_cli_provider_table_and_url_resolution_without_starting_ui():

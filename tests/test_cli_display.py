@@ -94,15 +94,38 @@ def test_the_state_log_names_each_field_as_the_state_does(tmp_path):
 
 
 @pytest.mark.unit
-def test_the_live_display_does_not_scroll_the_terminal():
+@pytest.mark.parametrize("interactive", [True, False])
+def test_the_live_display_does_not_scroll_the_terminal(monkeypatch, tmp_path, interactive):
     """A layout taller than the window makes rich redraw by scrolling, which
     reads as flicker; the alternate screen holds it in place (#784). The final
     report prints after the live view ends, so nothing is lost when it closes."""
-    import inspect
+    import cli.main as m
+    import cli.run as cli_run
+    from tests.native_cli_helpers import RecordingGraph
 
-    import cli.run as native
+    live_options = []
+    real_live = cli_run.Live
 
-    assert "screen=True" in inspect.getsource(native._execute_analysis)
+    def observe_live(*args, **kwargs):
+        live_options.append(kwargs)
+        return real_live(*args, **kwargs)
+
+    monkeypatch.setattr(cli_run, "Live", observe_live)
+    monkeypatch.setattr(cli_run.typer, "prompt", lambda *args, **kwargs: "N")
+    m.run_analysis(
+        selections={"ticker": "NVDA", "analysis_date": "2026-09-01",
+                    "analysts": ["market"], "asset_type": "stock"},
+        config={"results_dir": str(tmp_path)},
+        interactive=interactive,
+        # Interactive runs must use the dashboard by default; headless callers
+        # explicitly request it. Inspect the actual Live call in either path.
+        progress_mode=None if interactive else "live",
+        save_report=False,
+        graph_factory=RecordingGraph,
+    )
+
+    assert len(live_options) == 1
+    assert live_options[0]["screen"] is True
 
 
 class AnalystWallTimeTrackerTests(unittest.TestCase):
